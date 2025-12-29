@@ -1,0 +1,122 @@
+# ===========================
+# Environment & Secrets
+# ===========================
+.env
+.env.local
+.env.*.local
+*.env
+
+# ===========================
+# Python
+# ===========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ===========================
+# Virtual Environment
+# ===========================
+venv/
+ENV/
+env/
+.venv/
+.ENV/
+
+# ===========================
+# IDE & Editor
+# ===========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.spyderproject
+.spyproject
+
+# ===========================
+# OS Generated
+# ===========================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ===========================
+# Uploads & User Data
+# ===========================
+uploads/
+*.xlsx
+*.xls
+*.csv
+
+# ===========================
+# Logs
+# ===========================
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ===========================
+# Database (local SQLite if any)
+# ===========================
+*.db
+*.sqlite
+*.sqlite3
+
+# ===========================
+# Node / Frontend Build
+# ===========================
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+.npm
+.yarn
+
+# ===========================
+# Testing & Coverage
+# ===========================
+.coverage
+htmlcov/
+.tox/
+.nox/
+.pytest_cache/
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.coverage
+.hypothesis/
+
+# ===========================
+# Misc
+# ===========================
+*.bak
+*.tmp
+*.temp
+.cache/

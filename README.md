@@ -1,29 +1,35 @@
-# Gold Road
+# Backend API
 
-This project consists of two separate components:
+This is the FastAPI backend for Gold Road.
 
-1.  **Frontend**: A React application located in the `frontend/` directory.
-2.  **Backend**: A FastAPI application located in the `backend/` directory.
+## Setup
 
-## Deployment & Repository Split
-
-You can treat `frontend` and `backend` as separate repositories.
-
-To separate them:
-1.  Initialize a git repo in `frontend/`:
+1.  **Create a virtual environment**:
     ```bash
-    cd frontend
-    git init
-    # Add remote and push
-    ```
-2.  Initialize a git repo in `backend/`:
-    ```bash
-    cd backend
-    git init
-    # Add remote and push
+    python -m venv venv
     ```
 
-## Development
+2.  **Activate the virtual environment**:
+    - Windows:
+      ```bash
+      venv\Scripts\activate
+      ```
+    - macOS/Linux:
+      ```bash
+      source venv/bin/activate
+      ```
 
-- **Frontend**: Run `npm run dev` inside `frontend/`.
-- **Backend**: Run `uvicorn main:app --reload` inside `backend/`.
+3.  **Install dependencies**:
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+## Running the Server
+
+Start the development server:
+
+```bash
+uvicorn main:app --reload
+```
+
+The API will be available at `http://localhost:8000`.
