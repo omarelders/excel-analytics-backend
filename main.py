@@ -13,9 +13,18 @@ def on_startup():
     create_tables()
 
 # CORS Configuration - allows frontend to communicate with backend
+# Set CORS_ALLOWED_ORIGINS environment variable in production (comma-separated list)
+# Example: CORS_ALLOWED_ORIGINS=https://your-app.vercel.app,https://www.yourdomain.com
+cors_origins = os.getenv("CORS_ALLOWED_ORIGINS", "*")
+if cors_origins != "*":
+    # Split comma-separated origins and strip whitespace
+    cors_origins = [origin.strip() for origin in cors_origins.split(",")]
+else:
+    cors_origins = ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific origins like ["http://localhost:5173"]
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -48,10 +57,13 @@ def get_shipments(
     limit: int = 20,
     offset: int = 0,
     search: str = None,
-    status: str = None
+    status: str = None,
+    date_from: str = None,
+    date_to: str = None
 ):
     from database import SessionLocal, Shipment
-    from sqlalchemy import or_
+    from sqlalchemy import or_, func
+    from datetime import datetime
     
     db = SessionLocal()
     try:
@@ -72,6 +84,28 @@ def get_shipments(
         # Apply status filter
         if status:
             query = query.filter(Shipment.status == status)
+        
+        # Apply date filter
+        if date_from:
+            try:
+                from_date = datetime.strptime(date_from, "%Y-%m-%d").date()
+                if date_to:
+                    # Date range filter
+                    to_date = datetime.strptime(date_to, "%Y-%m-%d").date()
+                    query = query.filter(func.date(Shipment.date) >= from_date)
+                    query = query.filter(func.date(Shipment.date) <= to_date)
+                else:
+                    # Single date filter
+                    query = query.filter(func.date(Shipment.date) == from_date)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+        elif date_to:
+            # Only end date provided - filter all dates up to that date
+            try:
+                to_date = datetime.strptime(date_to, "%Y-%m-%d").date()
+                query = query.filter(func.date(Shipment.date) <= to_date)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
         
         # Get total count before pagination
         total_count = query.count()
