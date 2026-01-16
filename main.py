@@ -272,10 +272,10 @@ def search_shipments_global(query: str, limit: int = 50):
 
 @app.patch("/shipments/{shipment_code}/status")
 def update_shipment_status(shipment_code: str, new_status: str):
-    """Update the status of a shipment. Only allows specific status transitions."""
+    """Update the status of a shipment. Allows changing to any of the target statuses."""
     from database import SessionLocal, Shipment
     
-    # Use centralized constants
+    # Use centralized constants for allowed target statuses
     if new_status not in TARGET_STATUSES:
         raise HTTPException(
             status_code=400, 
@@ -289,13 +289,6 @@ def update_shipment_status(shipment_code: str, new_status: str):
         
         if not shipment:
             raise HTTPException(status_code=404, detail="Shipment not found")
-        
-        # Check if current status allows update
-        if shipment.status not in CHANGEABLE_STATUSES:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Cannot change status from '{shipment.status}'. Only orders with status '{', '.join(CHANGEABLE_STATUSES)}' can be updated."
-            )
         
         # Update the status
         old_status = shipment.status
@@ -313,6 +306,47 @@ def update_shipment_status(shipment_code: str, new_status: str):
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to update status: {str(e)}")
+    finally:
+        db.close()
+
+@app.patch("/shipments/{shipment_code}")
+def update_shipment(shipment_code: str, amount: float = None, description: str = None):
+    """Update shipment amount (قيمة الطرد) and/or description (الوصف)."""
+    from database import SessionLocal, Shipment
+    
+    if amount is None and description is None:
+        raise HTTPException(status_code=400, detail="At least one field (amount or description) must be provided")
+    
+    db = SessionLocal()
+    try:
+        shipment = db.query(Shipment).filter(Shipment.shipment_code == shipment_code).first()
+        
+        if not shipment:
+            raise HTTPException(status_code=404, detail="Shipment not found")
+        
+        # Track changes
+        changes = {}
+        
+        if amount is not None:
+            changes["amount"] = {"old": shipment.amount, "new": amount}
+            shipment.amount = amount
+            
+        if description is not None:
+            changes["description"] = {"old": shipment.description, "new": description}
+            shipment.description = description
+        
+        db.commit()
+        
+        return {
+            "success": True,
+            "shipment_code": shipment_code,
+            "changes": changes
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to update shipment: {str(e)}")
     finally:
         db.close()
 
