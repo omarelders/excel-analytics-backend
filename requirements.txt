@@ -1,23 +1,23 @@
 # Core API Framework
-fastapi==0.109.2
-uvicorn==0.27.1
+fastapi
+uvicorn
 
 # Request Handling
-python-multipart==0.0.9
+python-multipart
 
 # Configuration
-python-dotenv==1.0.1
+python-dotenv
 
 # Database
-sqlalchemy==2.0.25
-psycopg2-binary==2.9.9
+sqlalchemy
+psycopg2-binary
 
 # Data Processing
-pandas==2.1.4
-openpyxl==3.1.2
+pandas
+openpyxl
 
 # HTTP Client
-requests==2.31.0
+requests
 
 # Production Server
-gunicorn==21.2.0
+gunicorn
