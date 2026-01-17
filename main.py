@@ -306,6 +306,103 @@ def autocomplete_shipments(query: str, limit: int = 10):
         db.close()
 
 
+@app.get("/analytics")
+def get_analytics():
+    """
+    aggregated analytics data for the dashboard:
+    - Status distribution
+    - Top cities
+    - Daily trend
+    - Summary stats
+    """
+    from database import SessionLocal, Shipment
+    from sqlalchemy import func, desc
+    
+    db = SessionLocal()
+    try:
+        # 1. Summary Stats
+        total_shipments = db.query(Shipment).count()
+        
+        # Total Value (sum of amount)
+        total_value = db.query(func.sum(Shipment.amount)).scalar() or 0
+        
+        # Delivered Count
+        delivered_count = db.query(Shipment).filter(Shipment.status == 'تم التسليم').count()
+        
+        # Delivery Rate
+        delivery_rate = 0
+        if total_shipments > 0:
+            delivery_rate = round((delivered_count / total_shipments) * 100, 1)
+            
+        # Top Client
+        top_client_data = db.query(
+            Shipment.client_name, 
+            func.count(Shipment.id).label('count')
+        ).group_by(Shipment.client_name).order_by(desc('count')).first()
+        
+        # 2. Status Distribution
+        status_dist = db.query(
+            Shipment.status,
+            func.count(Shipment.id).label('count')
+        ).group_by(Shipment.status).all()
+        
+        status_distribution = [
+            {"status": s[0], "count": s[1]} for s in status_dist if s[0]
+        ]
+        
+        # 3. Top Cities
+        cities_dist = db.query(
+            Shipment.recipient_city,
+            func.count(Shipment.id).label('count')
+        ).filter(Shipment.recipient_city.isnot(None))\
+         .group_by(Shipment.recipient_city)\
+         .order_by(desc('count'))\
+         .limit(10)\
+         .all()
+         
+        top_cities = [
+            {"city": c[0], "count": c[1]} for c in cities_dist
+        ]
+        
+        # 4. Daily Trends (Last 30 days)
+        daily_trends_data = db.query(
+            func.date(Shipment.date).label('date'),
+            func.count(Shipment.id).label('count')
+        ).filter(Shipment.date.isnot(None))\
+         .group_by(func.date(Shipment.date))\
+         .order_by(func.date(Shipment.date))\
+         .limit(30)\
+         .all()
+         
+        daily_trends = [
+            {"date": str(d[0]), "count": d[1]} for d in daily_trends_data
+        ]
+
+        return {
+            "summary": {
+                "total_shipments": total_shipments,
+                "total_value": total_value,
+                "delivery_rate": delivery_rate,
+                "delivered_count": delivered_count,
+                "top_client": top_client_data[0] if top_client_data else None,
+                "top_client_count": top_client_data[1] if top_client_data else 0
+            },
+            "status_distribution": status_distribution,
+            "top_cities": top_cities,
+            "daily_trends": daily_trends
+        }
+    except Exception as e:
+        print(f"Analytics Error: {e}")
+        return {
+            "summary": {},
+            "status_distribution": [],
+            "top_cities": [],
+            "daily_trends": []
+        }
+    finally:
+        db.close()
+
+
 @app.patch("/shipments/{shipment_code}/status")
 def update_shipment_status(shipment_code: str, new_status: str):
     """Update the status of a shipment. Only allows specific status transitions."""
