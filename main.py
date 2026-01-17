@@ -13,18 +13,9 @@ def on_startup():
     create_tables()
 
 # CORS Configuration - allows frontend to communicate with backend
-# Set CORS_ALLOWED_ORIGINS environment variable in production (comma-separated list)
-# Example: CORS_ALLOWED_ORIGINS=https://your-app.vercel.app,https://www.yourdomain.com
-cors_origins = os.getenv("CORS_ALLOWED_ORIGINS", "*")
-if cors_origins != "*":
-    # Split comma-separated origins and strip whitespace
-    cors_origins = [origin.strip() for origin in cors_origins.split(",")]
-else:
-    cors_origins = ["*"]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=cors_origins,
+    allow_origins=["*"],  # In production, replace with specific origins like ["http://localhost:5173"]
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -57,13 +48,10 @@ def get_shipments(
     limit: int = 20,
     offset: int = 0,
     search: str = None,
-    status: str = None,
-    date_from: str = None,
-    date_to: str = None
+    status: str = None
 ):
     from database import SessionLocal, Shipment
-    from sqlalchemy import or_, func
-    from datetime import datetime
+    from sqlalchemy import or_
     
     db = SessionLocal()
     try:
@@ -85,33 +73,11 @@ def get_shipments(
         if status:
             query = query.filter(Shipment.status == status)
         
-        # Apply date filter
-        if date_from:
-            try:
-                from_date = datetime.strptime(date_from, "%Y-%m-%d").date()
-                if date_to:
-                    # Date range filter
-                    to_date = datetime.strptime(date_to, "%Y-%m-%d").date()
-                    query = query.filter(func.date(Shipment.date) >= from_date)
-                    query = query.filter(func.date(Shipment.date) <= to_date)
-                else:
-                    # Single date filter
-                    query = query.filter(func.date(Shipment.date) == from_date)
-            except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
-        elif date_to:
-            # Only end date provided - filter all dates up to that date
-            try:
-                to_date = datetime.strptime(date_to, "%Y-%m-%d").date()
-                query = query.filter(func.date(Shipment.date) <= to_date)
-            except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
-        
         # Get total count before pagination
         total_count = query.count()
         
-        # Apply pagination - order by date descending (latest to oldest)
-        shipments = query.order_by(Shipment.date.desc(), Shipment.id.desc()).offset(offset).limit(limit).all()
+        # Apply pagination
+        shipments = query.order_by(Shipment.id.desc()).offset(offset).limit(limit).all()
         
         result = []
         for s in shipments:
@@ -272,10 +238,10 @@ def search_shipments_global(query: str, limit: int = 50):
 
 @app.patch("/shipments/{shipment_code}/status")
 def update_shipment_status(shipment_code: str, new_status: str):
-    """Update the status of a shipment. Allows changing to any of the target statuses."""
+    """Update the status of a shipment. Only allows specific status transitions."""
     from database import SessionLocal, Shipment
     
-    # Use centralized constants for allowed target statuses
+    # Use centralized constants
     if new_status not in TARGET_STATUSES:
         raise HTTPException(
             status_code=400, 
@@ -289,6 +255,13 @@ def update_shipment_status(shipment_code: str, new_status: str):
         
         if not shipment:
             raise HTTPException(status_code=404, detail="Shipment not found")
+        
+        # Check if current status allows update
+        if shipment.status not in CHANGEABLE_STATUSES:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Cannot change status from '{shipment.status}'. Only orders with status '{', '.join(CHANGEABLE_STATUSES)}' can be updated."
+            )
         
         # Update the status
         old_status = shipment.status
@@ -306,47 +279,6 @@ def update_shipment_status(shipment_code: str, new_status: str):
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to update status: {str(e)}")
-    finally:
-        db.close()
-
-@app.patch("/shipments/{shipment_code}")
-def update_shipment(shipment_code: str, amount: float = None, description: str = None):
-    """Update shipment amount (قيمة الطرد) and/or description (الوصف)."""
-    from database import SessionLocal, Shipment
-    
-    if amount is None and description is None:
-        raise HTTPException(status_code=400, detail="At least one field (amount or description) must be provided")
-    
-    db = SessionLocal()
-    try:
-        shipment = db.query(Shipment).filter(Shipment.shipment_code == shipment_code).first()
-        
-        if not shipment:
-            raise HTTPException(status_code=404, detail="Shipment not found")
-        
-        # Track changes
-        changes = {}
-        
-        if amount is not None:
-            changes["amount"] = {"old": shipment.amount, "new": amount}
-            shipment.amount = amount
-            
-        if description is not None:
-            changes["description"] = {"old": shipment.description, "new": description}
-            shipment.description = description
-        
-        db.commit()
-        
-        return {
-            "success": True,
-            "shipment_code": shipment_code,
-            "changes": changes
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to update shipment: {str(e)}")
     finally:
         db.close()
 

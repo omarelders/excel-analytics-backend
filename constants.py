@@ -20,8 +20,7 @@ TARGET_STATUSES = [
 
 # All possible statuses in the system
 ALL_STATUSES = CHANGEABLE_STATUSES + TARGET_STATUSES + [
-    "ملغى",
-    "قيد التوصيل"
+    "ملغى"
 ]
 
 # Status display colors (for frontend reference)

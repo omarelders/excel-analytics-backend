@@ -1,10 +1,23 @@
-fastapi
-uvicorn
-python-multipart
-python-dotenv
-sqlalchemy
-pandas
-openpyxl
-requests
-gunicorn
-psycopg2-binary
+# Core API Framework
+fastapi==0.109.2
+uvicorn==0.27.1
+
+# Request Handling
+python-multipart==0.0.9
+
+# Configuration
+python-dotenv==1.0.1
+
+# Database
+sqlalchemy==2.0.25
+psycopg2-binary==2.9.9
+
+# Data Processing
+pandas==2.1.4
+openpyxl==3.1.2
+
+# HTTP Client
+requests==2.31.0
+
+# Production Server
+gunicorn==21.2.0
