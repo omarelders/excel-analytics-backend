@@ -306,7 +306,7 @@ def autocomplete_shipments(query: str, limit: int = 10):
         db.close()
 
 
-@app.get("/analytics")
+@app.get("/api/analytics")
 def get_analytics():
     """
     aggregated analytics data for the dashboard:
