@@ -236,6 +236,76 @@ def search_shipments_global(query: str, limit: int = 50):
     finally:
         db.close()
 
+@app.get("/shipments/autocomplete")
+def autocomplete_shipments(query: str, limit: int = 10):
+    """
+    Autocomplete search for code, client, recipient, and city.
+    Returns categorized suggestions.
+    """
+    from database import SessionLocal, Shipment
+    from sqlalchemy import or_, text
+
+    if not query:
+        return {"suggestions": [], "categories": {}}
+
+    db = SessionLocal()
+    try:
+        search_pattern = f"%{query}%"
+        
+        # We need to find distinct values for each category that match the query
+        # This is a bit more complex than a simple search
+        
+        suggestions = []
+        categories = {}
+        
+        # Helper to add suggestions
+        def add_suggestions(field, type_name, label, icon_name="Package"):
+            results = db.query(getattr(Shipment, field))\
+                .filter(getattr(Shipment, field).ilike(search_pattern))\
+                .distinct()\
+                .limit(5)\
+                .all()
+            
+            count = 0
+            for r in results:
+                val = r[0]
+                if val:
+                    suggestions.append({
+                        "value": str(val),
+                        "type": type_name,
+                        "count": "" # We could get count if needed
+                    })
+                    count += 1
+            if count > 0:
+                categories[type_name] = {
+                    "label": label,
+                    "count": count
+                }
+
+        # 1. Code
+        add_suggestions("shipment_code", "code", "الكود")
+        
+        # 2. Client
+        add_suggestions("client_name", "client", "العميل")
+        
+        # 3. Recipient
+        add_suggestions("recipient_name", "recipient", "المستلم")
+        
+        # 4. City (recipient_city)
+        add_suggestions("recipient_city", "city", "المدينة")
+        
+        return {
+            "query": query,
+            "suggestions": suggestions,
+            "categories": categories
+        }
+    except Exception as e:
+        print(f"Autocomplete error: {e}")
+        return {"suggestions": [], "categories": {}}
+    finally:
+        db.close()
+
+
 @app.patch("/shipments/{shipment_code}/status")
 def update_shipment_status(shipment_code: str, new_status: str):
     """Update the status of a shipment. Only allows specific status transitions."""
