@@ -323,8 +323,10 @@ def get_analytics():
         # 1. Summary Stats
         total_shipments = db.query(Shipment).count()
         
-        # Total Value (sum of amount)
-        total_value = db.query(func.sum(Shipment.amount)).scalar() or 0
+        # Total Value (sum of amount) - excluding returned orders (مرتجع)
+        total_value = db.query(func.sum(Shipment.amount)).filter(
+            Shipment.status != 'مرتجع'
+        ).scalar() or 0
         
         # Delivered Count
         delivered_count = db.query(Shipment).filter(Shipment.status == 'تم التسليم').count()
