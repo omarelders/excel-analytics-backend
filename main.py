@@ -103,8 +103,8 @@ def get_shipments(
         # Get total count before pagination
         total_count = query.count()
         
-        # Apply pagination
-        shipments = query.order_by(Shipment.id.desc()).offset(offset).limit(limit).all()
+        # Apply pagination - Sort by Date desc, then ID desc (for consistency)
+        shipments = query.order_by(Shipment.date.desc(), Shipment.id.desc()).offset(offset).limit(limit).all()
         
         result = []
         for s in shipments:

@@ -27,10 +27,7 @@ def save_upload(db: Session, filename: str, data: list, file_path: str = None):
     )
     
     for row in data:
-        # Skip rows where status is "تم التسليم" (Delivered)
-        if row.get("الحالة") == "تم التسليم":
-            skipped_delivered += 1
-            continue
+
         
         shipment_code = row.get("الكود")
         
