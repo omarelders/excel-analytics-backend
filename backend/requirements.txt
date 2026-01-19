@@ -1,0 +1,23 @@
+# Core API Framework
+fastapi
+uvicorn
+
+# Request Handling
+python-multipart
+
+# Configuration
+python-dotenv
+
+# Database
+sqlalchemy
+psycopg2-binary
+
+# Data Processing
+pandas
+openpyxl
+
+# HTTP Client
+requests
+
+# Production Server
+gunicorn
