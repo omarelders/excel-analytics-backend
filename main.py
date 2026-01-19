@@ -58,14 +58,16 @@ def get_shipments(
         # Base query
         query = db.query(Shipment)
         
-        # Apply search filter (searches code, client, recipient)
+        # Apply search filter (searches code, client, recipient, city, description)
         if search:
             search_term = f"%{search}%"
             query = query.filter(
                 or_(
                     Shipment.shipment_code.ilike(search_term),
                     Shipment.client_name.ilike(search_term),
-                    Shipment.recipient_name.ilike(search_term)
+                    Shipment.recipient_name.ilike(search_term),
+                    Shipment.recipient_city.ilike(search_term),
+                    Shipment.description.ilike(search_term)
                 )
             )
         
@@ -206,6 +208,7 @@ def search_shipments_global(query: str, limit: int = 50):
                     Shipment.shipment_code.ilike(search_term),
                     Shipment.client_name.ilike(search_term),
                     Shipment.recipient_name.ilike(search_term),
+                    Shipment.recipient_city.ilike(search_term),
                     Shipment.description.ilike(search_term)
                 )
             )\
@@ -580,7 +583,9 @@ def get_shipments_by_file(
                 or_(
                     Shipment.shipment_code.ilike(search_term),
                     Shipment.client_name.ilike(search_term),
-                    Shipment.recipient_name.ilike(search_term)
+                    Shipment.recipient_name.ilike(search_term),
+                    Shipment.recipient_city.ilike(search_term),
+                    Shipment.description.ilike(search_term)
                 )
             )
             

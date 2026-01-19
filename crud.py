@@ -4,7 +4,7 @@ from database import UploadedFile, Shipment
 from datetime import datetime
 import pandas as pd
 
-def save_upload(db: Session, filename: str, data: list):
+def save_upload(db: Session, filename: str, data: list, file_path: str = None):
     """
     Saves upload record and shipments to database.
     Uses transaction to ensure all-or-nothing insertion.
@@ -12,7 +12,7 @@ def save_upload(db: Session, filename: str, data: list):
     Skips rows where status is 'تم التسليم' (Delivered).
     """
     # 1. Create the File Record
-    db_file = UploadedFile(filename=filename)
+    db_file = UploadedFile(filename=filename, file_path=file_path)
     db.add(db_file)
     db.flush()  # Get the ID without committing yet
     
