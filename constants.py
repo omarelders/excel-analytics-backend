@@ -32,7 +32,7 @@ STATUS_COLORS = {
     "تم الاستلام بالمخزن": "info",
     "طلب الشحن": "pending",
     "طلب شحن": "pending",
-    "مرتجع": "warning",
+    "مرتجع": "error",
     "ملغى": "error",
     "قيد التوصيل": "info",
     "تسليم جزئي": "warning"
