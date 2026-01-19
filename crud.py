@@ -11,8 +11,8 @@ def save_upload(db: Session, filename: str, data: list, file_path: str = None):
     Skips duplicate shipments based on shipment_code.
     Skips rows where status is 'تم التسليم' (Delivered).
     """
-    # 1. Create the File Record
-    db_file = UploadedFile(filename=filename, file_path=file_path)
+    # 1. Create the File Record (file_path not stored in DB)
+    db_file = UploadedFile(filename=filename)
     db.add(db_file)
     db.flush()  # Get the ID without committing yet
     

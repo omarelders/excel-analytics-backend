@@ -7,7 +7,8 @@ Single source of truth for status values used across the application.
 CHANGEABLE_STATUSES = [
     "طلب الشحن",
     "طلب شحن",
-    "تم الاستلام بالمخزن"
+    "تم الاستلام بالمخزن",
+    "قيد التوصيل"
 ]
 
 # Statuses that orders can be changed TO (target statuses)
