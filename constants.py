@@ -3,12 +3,16 @@ Centralized constants for shipment statuses.
 Single source of truth for status values used across the application.
 """
 
-# Statuses from which orders CAN be changed (source statuses)
+# ALL statuses can now be changed (no restrictions on source status)
 CHANGEABLE_STATUSES = [
     "طلب الشحن",
     "طلب شحن",
     "تم الاستلام بالمخزن",
-    "قيد التوصيل"
+    "قيد التوصيل",
+    "تم التسليم",
+    "مرتجع",
+    "تسليم جزئي",
+    "ملغى"
 ]
 
 # Statuses that orders can be changed TO (target statuses)
@@ -20,9 +24,7 @@ TARGET_STATUSES = [
 ]
 
 # All possible statuses in the system
-ALL_STATUSES = CHANGEABLE_STATUSES + TARGET_STATUSES + [
-    "ملغى"
-]
+ALL_STATUSES = list(set(CHANGEABLE_STATUSES + TARGET_STATUSES))
 
 # Status display colors (for frontend reference)
 STATUS_COLORS = {
@@ -32,5 +34,6 @@ STATUS_COLORS = {
     "طلب شحن": "pending",
     "مرتجع": "warning",
     "ملغى": "error",
-    "قيد التوصيل": "info"
+    "قيد التوصيل": "info",
+    "تسليم جزئي": "warning"
 }

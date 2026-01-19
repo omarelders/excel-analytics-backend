@@ -1,16 +1,23 @@
 import shutil
 import os
 import uuid
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from constants import CHANGEABLE_STATUSES, TARGET_STATUSES, ALL_STATUSES, STATUS_COLORS
 
-app = FastAPI(title="Gold Road API")
 
-@app.on_event("startup")
-def on_startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Modern lifespan context manager for startup/shutdown events"""
+    # Startup: Create database tables
     from database import create_tables
     create_tables()
+    yield
+    # Shutdown: cleanup code would go here if needed
+
+
+app = FastAPI(title="Gold Road API", lifespan=lifespan)
 
 # CORS Configuration - allows frontend to communicate with backend
 app.add_middleware(
@@ -48,10 +55,13 @@ def get_shipments(
     limit: int = 20,
     offset: int = 0,
     search: str = None,
-    status: str = None
+    status: str = None,
+    date_from: str = None,
+    date_to: str = None
 ):
     from database import SessionLocal, Shipment
-    from sqlalchemy import or_
+    from sqlalchemy import or_, func
+    from datetime import datetime
     
     db = SessionLocal()
     try:
@@ -74,6 +84,21 @@ def get_shipments(
         # Apply status filter
         if status:
             query = query.filter(Shipment.status == status)
+        
+        # Apply date filters
+        if date_from:
+            try:
+                from_date = datetime.strptime(date_from, "%Y-%m-%d").date()
+                query = query.filter(func.date(Shipment.date) >= from_date)
+            except ValueError:
+                pass  # Invalid date format, skip filter
+        
+        if date_to:
+            try:
+                to_date = datetime.strptime(date_to, "%Y-%m-%d").date()
+                query = query.filter(func.date(Shipment.date) <= to_date)
+            except ValueError:
+                pass  # Invalid date format, skip filter
         
         # Get total count before pagination
         total_count = query.count()
@@ -453,6 +478,57 @@ def update_shipment_status(shipment_code: str, new_status: str):
         raise HTTPException(status_code=500, detail=f"Failed to update status: {str(e)}")
     finally:
         db.close()
+
+
+@app.patch("/shipments/{shipment_code}")
+def update_shipment(shipment_code: str, amount: float = None, description: str = None):
+    """Update shipment amount and/or description."""
+    from database import SessionLocal, Shipment
+    
+    # Validate that at least one field is provided
+    if amount is None and description is None:
+        raise HTTPException(
+            status_code=400, 
+            detail="At least one field (amount or description) must be provided"
+        )
+    
+    db = SessionLocal()
+    try:
+        # Find the shipment
+        shipment = db.query(Shipment).filter(Shipment.shipment_code == shipment_code).first()
+        
+        if not shipment:
+            raise HTTPException(status_code=404, detail="Shipment not found")
+        
+        # Track what was updated
+        updated_fields = []
+        
+        # Update amount if provided
+        if amount is not None:
+            shipment.amount = amount
+            updated_fields.append("amount")
+        
+        # Update description if provided
+        if description is not None:
+            shipment.description = description
+            updated_fields.append("description")
+        
+        db.commit()
+        
+        return {
+            "success": True,
+            "shipment_code": shipment_code,
+            "updated_fields": updated_fields,
+            "message": f"Successfully updated: {', '.join(updated_fields)}"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to update shipment: {str(e)}")
+    finally:
+        db.close()
+
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
