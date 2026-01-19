@@ -1,0 +1,393 @@
+/* Payment Processing Page - Theme Aware */
+
+.payment-page {
+  padding: 2rem;
+  max-width: 1400px;
+  margin: 0 auto;
+  background: hsl(var(--background));
+  min-height: 100vh;
+}
+
+.page-title {
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: hsl(var(--foreground));
+  margin-bottom: 2rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* Upload Card */
+.payment-page .upload-card {
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: 12px;
+  padding: 2.5rem;
+  margin-bottom: 2rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.5rem;
+}
+
+.payment-page .upload-zone {
+  width: 100%;
+  max-width: 600px;
+  border: 2px dashed hsl(var(--border));
+  border-radius: 8px;
+  padding: 3rem 2rem;
+  text-align: center;
+  transition: all 0.2s ease;
+  cursor: pointer;
+  background: hsl(var(--background));
+}
+
+.payment-page .upload-zone:hover,
+.payment-page .upload-zone.dragging {
+  border-color: hsl(var(--primary));
+  background: hsl(var(--accent));
+}
+
+.payment-page .upload-zone.has-file {
+  border-color: hsl(142.1 76.2% 36.3%);
+  background: hsl(142.1 76.2% 36.3% / 0.08);
+}
+
+.payment-page .upload-icon {
+  color: hsl(var(--muted-foreground));
+  margin-bottom: 1rem;
+}
+
+.payment-page .upload-zone h3 {
+  color: hsl(var(--foreground));
+  font-size: 1.125rem;
+  font-weight: 500;
+  margin-bottom: 0.5rem;
+}
+
+.payment-page .upload-hint {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.875rem;
+  margin-bottom: 1.5rem;
+}
+
+.payment-page .upload-limit {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.75rem;
+  margin-top: 1rem;
+}
+
+/* Content Section */
+.content-section {
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: 12px;
+  padding: 2rem;
+  min-height: 400px;
+}
+
+/* Files Section */
+.files-section h2 {
+  color: hsl(var(--foreground));
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin-bottom: 1.5rem;
+}
+
+/* Files Grid */
+.files-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 1.25rem;
+}
+
+.file-card {
+  position: relative;
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  padding: 1.5rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+[data-theme="light"] .file-card {
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 1px 2px 0 rgba(0, 0, 0, 0.03);
+  background: hsl(var(--background));
+}
+
+.file-card:hover {
+  background: hsl(var(--accent));
+  border-color: hsl(var(--primary) / 0.3);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+}
+
+[data-theme="light"] .file-card:hover {
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.08), 0 2px 4px -1px rgba(0, 0, 0, 0.04);
+}
+
+/* Delete Button */
+.file-card .delete-btn {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: hsl(var(--secondary));
+  border: 1px solid hsl(var(--border));
+  color: hsl(0 84% 60%);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: all 0.2s ease;
+  z-index: 10;
+}
+
+.file-card:hover .delete-btn {
+  opacity: 1;
+}
+
+.file-card .delete-btn:hover {
+  background: hsl(0 84% 60%);
+  border-color: hsl(0 72% 51%);
+  color: white;
+}
+
+.file-icon {
+  width: 64px;
+  height: 64px;
+  background: hsl(var(--secondary));
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 1rem;
+}
+
+.file-icon svg {
+  color: hsl(var(--primary));
+}
+
+.file-info {
+  width: 100%;
+}
+
+.file-name {
+  color: hsl(var(--foreground));
+  font-size: 0.9rem;
+  font-weight: 500;
+  margin-bottom: 0.5rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-meta {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.8rem;
+  margin-bottom: 0.25rem;
+}
+
+.file-date {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.75rem;
+}
+
+/* Loading & Empty States */
+.loading-state,
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 4rem 2rem;
+  color: hsl(var(--muted-foreground));
+}
+
+.loading-state p,
+.empty-state p {
+  margin-top: 1rem;
+  font-size: 0.9rem;
+}
+
+.empty-state .empty-icon {
+  color: hsl(var(--muted-foreground));
+}
+
+.empty-state .hint {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.875rem;
+}
+
+/* Buttons */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1.5rem;
+  border-radius: 6px;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  border: none;
+}
+
+.btn-primary {
+  background: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: hsl(var(--primary) / 0.9);
+}
+
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-outline {
+  background: transparent;
+  border: 1px solid hsl(var(--border));
+  color: hsl(var(--foreground));
+}
+
+.btn-outline:hover {
+  background: hsl(var(--accent));
+  border-color: hsl(var(--input));
+}
+
+.btn-ghost {
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+}
+
+.btn-ghost:hover {
+  background: hsl(var(--accent));
+}
+
+.btn-large {
+  padding: 0.875rem 2rem;
+  font-size: 0.9375rem;
+}
+
+/* Alert */
+.alert {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.875rem 1.25rem;
+  border-radius: 6px;
+  font-size: 0.875rem;
+  width: 100%;
+  max-width: 600px;
+}
+
+.alert.success {
+  background: hsl(142.1 76.2% 36.3% / 0.12);
+  border: 1px solid hsl(142.1 76.2% 36.3% / 0.3);
+  color: hsl(142.1 76.2% 50%);
+}
+
+.alert.error {
+  background: hsl(var(--destructive) / 0.12);
+  border: 1px solid hsl(var(--destructive) / 0.3);
+  color: hsl(var(--destructive));
+}
+
+/* Spin animation */
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .payment-page {
+    padding: 1rem;
+  }
+  
+  .page-title {
+    font-size: 1.25rem;
+  }
+  
+  .payment-page .upload-card {
+    padding: 1.5rem;
+  }
+  
+  .payment-page .upload-zone {
+    padding: 2rem 1rem;
+  }
+  
+  .files-grid {
+    grid-template-columns: 1fr;
+    gap: 1rem;
+  }
+  
+  .file-card {
+    padding: 1.25rem;
+  }
+  
+  .file-icon {
+    width: 54px;
+    height: 54px;
+  }
+  
+  .btn {
+    min-height: 44px;
+  }
+}
+
+/* Mobile phones */
+@media (max-width: 480px) {
+  .payment-page {
+    padding: 0.75rem;
+  }
+  
+  .page-title {
+    font-size: 1.125rem;
+  }
+  
+  .payment-page .upload-card {
+    padding: 1rem;
+  }
+  
+  .payment-page .upload-zone h3 {
+    font-size: 1rem;
+  }
+  
+  .payment-page .upload-hint {
+    font-size: 0.8125rem;
+  }
+  
+  .file-card {
+    padding: 1rem;
+  }
+  
+  .file-icon {
+    width: 48px;
+    height: 48px;
+  }
+  
+  .file-name {
+    font-size: 0.8125rem;
+  }
+  
+  .file-meta,
+  .file-date {
+    font-size: 0.75rem;
+  }
+}

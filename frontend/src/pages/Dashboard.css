@@ -1,0 +1,394 @@
+.dashboard-page {
+  padding: 1.5rem;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.dashboard-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+}
+
+.dashboard-header h1 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: hsl(0 0% 98%);
+  margin: 0;
+}
+
+.refresh-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  background: transparent;
+  border: 1px solid hsl(240 3.7% 15.9%);
+  border-radius: 6px;
+  color: hsl(0 0% 98%);
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.refresh-btn:hover {
+  background: hsl(240 3.7% 15.9%);
+}
+
+/* Loading & Error States */
+.loading-container,
+.error-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  min-height: 400px;
+  color: hsl(240 5% 64.9%);
+}
+
+.error-container {
+  color: #ef4444;
+}
+
+.retry-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  background: hsl(0 0% 98%);
+  color: hsl(240 5.9% 10%);
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.875rem;
+}
+
+.retry-btn:hover {
+  background: hsl(0 0% 90%);
+}
+
+/* Stats Grid */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.stat-card {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1.25rem;
+  background: hsl(0 0% 3.9%);
+  border: 1px solid hsl(240 3.7% 15.9%);
+  border-radius: 8px;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.stat-card .stat-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 10px;
+}
+
+.stat-card.primary .stat-icon {
+  background: rgba(59, 130, 246, 0.15);
+  color: #3b82f6;
+}
+
+.stat-card.success .stat-icon {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+}
+
+.stat-card.info .stat-icon {
+  background: rgba(139, 92, 246, 0.15);
+  color: #8b5cf6;
+}
+
+.stat-card.warning .stat-icon {
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+}
+
+.stat-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.stat-value {
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: hsl(0 0% 98%);
+}
+
+.stat-label {
+  font-size: 0.8125rem;
+  color: hsl(240 5% 64.9%);
+}
+
+/* Status Section */
+.status-section {
+  background: hsl(0 0% 3.9%);
+  border: 1px solid hsl(240 3.7% 15.9%);
+  border-radius: 8px;
+  padding: 1.25rem;
+  margin-bottom: 1.5rem;
+}
+
+.status-section h2 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: hsl(0 0% 98%);
+  margin: 0 0 1rem 0;
+}
+
+.status-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.status-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: hsl(240 3.7% 15.9% / 0.5);
+  border-radius: 6px;
+  font-size: 0.8125rem;
+}
+
+.status-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.status-name {
+  color: hsl(0 0% 98%);
+}
+
+.status-count {
+  color: hsl(240 5% 64.9%);
+  font-weight: 500;
+}
+
+/* Recent Shipments */
+.recent-section {
+  background: hsl(0 0% 3.9%);
+  border: 1px solid hsl(240 3.7% 15.9%);
+  border-radius: 8px;
+  padding: 1.25rem;
+}
+
+.recent-section h2 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: hsl(0 0% 98%);
+  margin: 0 0 1rem 0;
+}
+
+.no-data {
+  color: hsl(240 5% 64.9%);
+  font-size: 0.875rem;
+  text-align: center;
+  padding: 2rem;
+}
+
+.recent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.recent-item {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem;
+  background: hsl(240 3.7% 15.9% / 0.3);
+  border-radius: 6px;
+  transition: background 0.15s;
+}
+
+.recent-item:hover {
+  background: hsl(240 3.7% 15.9% / 0.5);
+}
+
+.recent-code {
+  font-family: monospace;
+  font-size: 0.8125rem;
+  color: #3b82f6;
+  background: rgba(59, 130, 246, 0.1);
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+}
+
+.recent-details {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.recent-client {
+  font-size: 0.875rem;
+  color: hsl(0 0% 98%);
+}
+
+.recent-city {
+  font-size: 0.75rem;
+  color: hsl(240 5% 64.9%);
+}
+
+.recent-amount {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: #10b981;
+}
+
+.recent-status {
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+/* Spin Animation */
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .dashboard-page {
+    padding: 1rem;
+  }
+
+  .dashboard-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1rem;
+  }
+
+  .dashboard-header h1 {
+    font-size: 1.25rem;
+  }
+
+  /* Touch-friendly refresh button */
+  .refresh-btn {
+    min-height: 44px;
+  }
+
+  /* Stats grid improvement */
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.875rem;
+  }
+
+  .stat-card {
+    padding: 1rem;
+  }
+
+  /* Recent items */
+  .recent-item {
+    grid-template-columns: 1fr;
+    gap: 0.5rem;
+  }
+
+  /* Status grid better wrapping */
+  .status-grid {
+    gap: 0.5rem;
+  }
+}
+
+/* Small tablets and large phones */
+@media (max-width: 640px) {
+  .stats-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Mobile phones */
+@media (max-width: 480px) {
+  .dashboard-page {
+    padding: 0.75rem;
+  }
+
+  .dashboard-header h1 {
+    font-size: 1.125rem;
+  }
+
+  /* Compact stats */
+  .stats-grid {
+    gap: 0.75rem;
+  }
+
+  .stat-card {
+    padding: 0.875rem;
+  }
+
+  .stat-card .stat-icon {
+    width: 42px;
+    height: 42px;
+  }
+
+  .stat-value {
+    font-size: 1.25rem;
+  }
+
+  .stat-label {
+    font-size: 0.75rem;
+  }
+
+  /* Compact sections */
+  .status-section,
+  .recent-section {
+    padding: 1rem;
+  }
+
+  .status-section h2,
+  .recent-section h2 {
+    font-size: 0.9375rem;
+  }
+
+  /* Status items */
+  .status-item {
+    padding: 0.5rem 0.625rem;
+    font-size: 0.75rem;
+  }
+
+  /* Recent items compact */
+  .recent-code {
+    font-size: 0.75rem;
+  }
+
+  .recent-client {
+    font-size: 0.8125rem;
+  }
+
+  .recent-city,
+  .recent-status {
+    font-size: 0.6875rem;
+  }
+
+  .recent-amount {
+    font-size: 0.8125rem;
+  }
+}

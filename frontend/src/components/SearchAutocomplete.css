@@ -1,0 +1,358 @@
+/* ============================================
+   SEARCH AUTOCOMPLETE - MATCHING APP DESIGN
+   ============================================ */
+
+.search-autocomplete {
+  position: relative;
+  width: 100%;
+  max-width: 400px;
+  flex: 1;
+}
+
+/* Form Layout */
+.autocomplete-form {
+  display: flex;
+  gap: 0.5rem;
+  width: 100%;
+  align-items: center;
+}
+
+/* Input Wrapper */
+.autocomplete-input-wrapper {
+  flex: 1;
+  position: relative;
+  display: flex;
+  align-items: center;
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  height: 40px;
+  padding: 0 0.75rem;
+  transition: border-color 0.2s;
+}
+
+.autocomplete-input-wrapper:hover {
+  border-color: hsl(var(--ring) / 0.5);
+}
+
+.autocomplete-input-wrapper:focus-within {
+  border-color: hsl(var(--ring));
+}
+
+.autocomplete-input-wrapper .search-icon {
+  color: hsl(var(--muted-foreground));
+  flex-shrink: 0;
+  margin-right: 0.5rem;
+}
+
+.autocomplete-input-wrapper:focus-within .search-icon {
+  color: hsl(var(--primary));
+}
+
+.autocomplete-input-wrapper input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: hsl(var(--foreground));
+  font-size: 0.875rem;
+  outline: none;
+  padding: 0;
+}
+
+.autocomplete-input-wrapper input::placeholder {
+  color: hsl(var(--muted-foreground));
+}
+
+/* Loading Spinner */
+.autocomplete-input-wrapper .loading-spinner {
+  color: hsl(var(--primary));
+  animation: spin 1s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Clear Button */
+.clear-input-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  padding: 0.25rem;
+  border-radius: 4px;
+  flex-shrink: 0;
+  transition: all 0.2s;
+}
+
+.clear-input-btn:hover {
+  color: hsl(var(--foreground));
+  background: hsl(var(--accent));
+}
+
+/* Submit Button */
+.search-submit-btn {
+  height: 40px;
+  padding: 0 1rem;
+  border: none;
+  border-radius: 6px;
+  background: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+  font-weight: 500;
+  font-size: 0.875rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.2s;
+}
+
+.search-submit-btn:hover {
+  background: hsl(var(--primary) / 0.9);
+}
+
+.search-submit-btn:active {
+  background: hsl(var(--primary) / 0.8);
+}
+
+/* ============================================
+   SUGGESTIONS DROPDOWN
+   ============================================ */
+
+.suggestions-dropdown {
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  left: 0;
+  right: 0;
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  z-index: 1000;
+  max-height: 400px;
+  overflow-y: auto;
+  animation: dropdownFade 0.15s ease-out;
+}
+
+@keyframes dropdownFade {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+[data-theme="light"] .suggestions-dropdown {
+  box-shadow: 
+    0 4px 6px -1px rgba(0, 0, 0, 0.08),
+    0 10px 15px -3px rgba(0, 0, 0, 0.1);
+}
+
+/* Scrollbar Styling */
+.suggestions-dropdown::-webkit-scrollbar {
+  width: 6px;
+}
+
+.suggestions-dropdown::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.suggestions-dropdown::-webkit-scrollbar-thumb {
+  background: hsl(var(--border));
+  border-radius: 3px;
+}
+
+.suggestions-dropdown::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground));
+}
+
+/* Category Sections */
+.suggestion-category {
+  padding: 0;
+}
+
+.suggestion-category:not(:last-of-type) {
+  border-bottom: 1px solid hsl(var(--border));
+}
+
+.category-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.625rem 1rem 0.5rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.075em;
+  color: hsl(var(--muted-foreground));
+  background: hsl(var(--muted) / 0.5);
+}
+
+/* Suggestion Items */
+.suggestion-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0.625rem 1rem;
+  border: none;
+  background: transparent;
+  color: hsl(var(--foreground));
+  font-size: 0.875rem;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease;
+  border-left: 3px solid transparent;
+}
+
+.suggestion-item:hover {
+  background: hsl(var(--accent));
+}
+
+.suggestion-item.active {
+  background: hsl(var(--accent));
+  border-left-color: hsl(var(--primary));
+}
+
+.suggestion-value {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.suggestion-count {
+  flex-shrink: 0;
+  padding: 0.125rem 0.5rem;
+  border-radius: 12px;
+  background: hsl(var(--muted));
+  color: hsl(var(--muted-foreground));
+  font-size: 0.6875rem;
+  font-weight: 600;
+  margin-left: 0.75rem;
+}
+
+.suggestion-item:hover .suggestion-count,
+.suggestion-item.active .suggestion-count {
+  background: hsl(var(--primary) / 0.15);
+  color: hsl(var(--primary));
+}
+
+/* Keyboard Tips */
+.dropdown-tip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.625rem;
+  background: hsl(var(--muted) / 0.3);
+  border-top: 1px solid hsl(var(--border));
+  font-size: 0.6875rem;
+  color: hsl(var(--muted-foreground));
+}
+
+.dropdown-tip kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 0.375rem;
+  border: 1px solid hsl(var(--border));
+  border-radius: 3px;
+  background: hsl(var(--card));
+  font-family: inherit;
+  font-size: 0.625rem;
+  font-weight: 500;
+  color: hsl(var(--muted-foreground));
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+/* No Results State */
+.suggestions-dropdown.no-results {
+  padding: 2rem;
+}
+
+.no-results-message {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  color: hsl(var(--muted-foreground));
+  text-align: center;
+  font-size: 0.875rem;
+}
+
+.no-results-message svg {
+  opacity: 0.4;
+}
+
+/* ============================================
+   LIGHT THEME ADJUSTMENTS
+   ============================================ */
+
+[data-theme="light"] .autocomplete-input-wrapper {
+  background: hsl(var(--background));
+  border-color: hsl(var(--input));
+}
+
+[data-theme="light"] .autocomplete-input-wrapper:hover {
+  border-color: hsl(var(--ring) / 0.5);
+}
+
+[data-theme="light"] .autocomplete-input-wrapper:focus-within {
+  border-color: hsl(var(--ring));
+}
+
+/* ============================================
+   RESPONSIVE DESIGN
+   ============================================ */
+
+@media (max-width: 768px) {
+  .search-autocomplete {
+    max-width: 100%;
+  }
+
+  .autocomplete-form {
+    gap: 0.5rem;
+  }
+
+  .suggestions-dropdown {
+    max-height: 300px;
+  }
+
+  .dropdown-tip {
+    display: none;
+  }
+
+  .suggestion-item {
+    padding: 0.75rem 1rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .autocomplete-input-wrapper input {
+    font-size: 16px; /* Prevents zoom on iOS */
+  }
+
+  .autocomplete-form {
+    flex-direction: column;
+  }
+
+  .search-submit-btn {
+    width: 100%;
+  }
+
+  .category-header {
+    padding: 0.5rem 0.875rem 0.375rem;
+  }
+
+  .suggestion-item {
+    padding: 0.625rem 0.875rem;
+  }
+}

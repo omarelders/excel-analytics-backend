@@ -1,0 +1,13 @@
+
+/* Mobile column visibility - hide date, client, weight columns */
+@media (max-width: 768px) {
+  /* Hide التاريخ (date), العميل (client), الوزن (weight) on mobile */
+  .orders-table thead tr th:nth-child(3),  /* التاريخ */
+  .orders-table tbody tr td:nth-child(3),
+  .orders-table thead tr th:nth-child(4),  /* العميل */
+  .orders-table tbody tr td:nth-child(4),
+  .orders-table thead tr th:nth-child(11), /* الوزن */
+  .orders-table tbody tr td:nth-child(11) {
+    display: none;
+  }
+}
