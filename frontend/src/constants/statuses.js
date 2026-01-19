@@ -17,6 +17,7 @@ export const CHANGEABLE_STATUSES = [
 ]
 
 // Statuses that orders can be changed TO (target statuses)
+// Synced with backend constants.py - only these 4 statuses can be selected as targets
 export const TARGET_STATUSES = [
   'تم التسليم',
   'مرتجع',
