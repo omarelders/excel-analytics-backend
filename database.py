@@ -1,6 +1,6 @@
 import os
 from datetime import datetime
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float, ForeignKey, Text, text
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float, ForeignKey, Text, text, Boolean
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from dotenv import load_dotenv
 
@@ -85,6 +85,10 @@ class Shipment(Base):
     pieces_count = Column("عدد القطع", Integer)
     description = Column("الوصف", Text)
     notes = Column("ملاحظات", Text)
+    
+    # Soft Delete
+    is_deleted = Column(Boolean, default=False, index=True)
+    deleted_at = Column(DateTime, nullable=True)
     
     # Relationship
     source_file = relationship("UploadedFile", back_populates="shipments")
@@ -175,6 +179,10 @@ class PaymentRecord(Base):
     is_cancelled = Column("تم الإلغاء", String)
     last_movement_date = Column("تاريخ أخر حركة", DateTime)
     client_dues_payment = Column("سداد مستحقات العملاء", String)
+    
+    # Soft Delete
+    is_deleted = Column(Boolean, default=False, index=True)
+    deleted_at = Column(DateTime, nullable=True)
     
     # Relationship
     source_file = relationship("PaymentFile", back_populates="records")

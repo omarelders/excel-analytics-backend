@@ -65,8 +65,8 @@ def get_shipments(
     
     db = SessionLocal()
     try:
-        # Base query
-        query = db.query(Shipment)
+        # Base query - exclude soft deleted records
+        query = db.query(Shipment).filter(Shipment.is_deleted == False)
         
         # Apply search filter (searches code, client, recipient, city, description)
         if search:
@@ -133,16 +133,22 @@ def get_shipments(
 
 @app.delete("/shipments/{shipment_code}")
 def delete_shipment(shipment_code: str):
-    """Delete a specific shipment by its code."""
+    """Soft delete a specific shipment by its code."""
     from database import SessionLocal, Shipment
+    from datetime import datetime
     
     db = SessionLocal()
     try:
-        shipment = db.query(Shipment).filter(Shipment.shipment_code == shipment_code).first()
+        shipment = db.query(Shipment).filter(
+            Shipment.shipment_code == shipment_code,
+            Shipment.is_deleted == False
+        ).first()
         if not shipment:
             raise HTTPException(status_code=404, detail="Shipment not found")
         
-        db.delete(shipment)
+        # Soft delete instead of hard delete
+        shipment.is_deleted = True
+        shipment.deleted_at = datetime.utcnow()
         db.commit()
         return {"message": "Shipment deleted successfully", "deleted_code": shipment_code}
     except HTTPException:
@@ -152,6 +158,73 @@ def delete_shipment(shipment_code: str):
         raise HTTPException(status_code=500, detail=f"Failed to delete shipment: {str(e)}")
     finally:
         db.close()
+
+@app.post("/shipments/{shipment_code}/restore")
+def restore_shipment(shipment_code: str):
+    """Restore a soft-deleted shipment."""
+    from database import SessionLocal, Shipment
+    
+    db = SessionLocal()
+    try:
+        # Find the deleted shipment
+        shipment = db.query(Shipment).filter(
+            Shipment.shipment_code == shipment_code,
+            Shipment.is_deleted == True
+        ).first()
+        
+        if not shipment:
+            raise HTTPException(status_code=404, detail="Deleted shipment not found")
+        
+        # Restore the shipment
+        shipment.is_deleted = False
+        shipment.deleted_at = None
+        db.commit()
+        
+        return {"message": "Shipment restored successfully", "restored_code": shipment_code}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to restore shipment: {str(e)}")
+    finally:
+        db.close()
+
+@app.get("/shipments/deleted")
+def get_deleted_shipments(limit: int = 50, offset: int = 0):
+    """Returns list of soft-deleted shipments for recovery."""
+    from database import SessionLocal, Shipment
+    
+    db = SessionLocal()
+    try:
+        query = db.query(Shipment).filter(Shipment.is_deleted == True)
+        
+        total_count = query.count()
+        shipments = query.order_by(Shipment.deleted_at.desc()).offset(offset).limit(limit).all()
+        
+        result = []
+        for s in shipments:
+            result.append({
+                "الكود": s.shipment_code,
+                "التاريخ": str(s.date) if s.date else None,
+                "العميل": s.client_name,
+                "الوصف": s.description,
+                "الحالة": s.status,
+                "المستلم": s.recipient_name,
+                "مدينة المستلم": s.recipient_city,
+                "قيمة الطرد": s.amount,
+                "تاريخ الحذف": str(s.deleted_at) if s.deleted_at else None
+            })
+        
+        return {
+            "data": result,
+            "count": len(result),
+            "total": total_count,
+            "limit": limit,
+            "offset": offset
+        }
+    finally:
+        db.close()
+
 
 @app.get("/shipments/days")
 def get_shipping_days():
@@ -163,8 +236,9 @@ def get_shipping_days():
     try:
         dates = db.query(func.distinct(func.date(Shipment.date)))\
             .filter(Shipment.date.isnot(None))\
+            .filter(Shipment.is_deleted == False)\
             .order_by(func.date(Shipment.date).desc())\
-            .limit(30)\
+            .limit(100)\
             .all()
         
         return {"days": [str(d[0]) for d in dates if d[0]]}
@@ -186,9 +260,10 @@ def get_shipments_by_day(date: str):
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
         
-        # Query shipments for that date
+        # Query shipments for that date (exclude deleted)
         shipments = db.query(Shipment)\
             .filter(func.date(Shipment.date) == target_date)\
+            .filter(Shipment.is_deleted == False)\
             .order_by(Shipment.id.desc())\
             .all()
         
@@ -228,6 +303,7 @@ def search_shipments_global(query: str, limit: int = 50):
     try:
         search_term = f"%{query}%"
         shipments = db.query(Shipment)\
+            .filter(Shipment.is_deleted == False)\
             .filter(
                 or_(
                     Shipment.shipment_code.ilike(search_term),
@@ -286,9 +362,10 @@ def autocomplete_shipments(query: str, limit: int = 10):
         suggestions = []
         categories = {}
         
-        # Helper to add suggestions
+        # Helper to add suggestions (exclude deleted)
         def add_suggestions(field, type_name, label, icon_name="Package"):
             results = db.query(getattr(Shipment, field))\
+                .filter(Shipment.is_deleted == False)\
                 .filter(getattr(Shipment, field).ilike(search_pattern))\
                 .distinct()\
                 .limit(5)\
@@ -348,16 +425,20 @@ def get_analytics():
     
     db = SessionLocal()
     try:
-        # 1. Summary Stats
-        total_shipments = db.query(Shipment).count()
+        # 1. Summary Stats (exclude deleted)
+        total_shipments = db.query(Shipment).filter(Shipment.is_deleted == False).count()
         
-        # Total Value (sum of amount) - excluding returned orders (مرتجع)
+        # Total Value (sum of amount) - excluding returned orders (مرتجع) and deleted
         total_value = db.query(func.sum(Shipment.amount)).filter(
-            Shipment.status != 'مرتجع'
+            Shipment.status != 'مرتجع',
+            Shipment.is_deleted == False
         ).scalar() or 0
         
         # Delivered Count
-        delivered_count = db.query(Shipment).filter(Shipment.status == 'تم التسليم').count()
+        delivered_count = db.query(Shipment).filter(
+            Shipment.status == 'تم التسليم',
+            Shipment.is_deleted == False
+        ).count()
         
         # Delivery Rate
         delivery_rate = 0
@@ -368,13 +449,13 @@ def get_analytics():
         top_client_data = db.query(
             Shipment.client_name, 
             func.count(Shipment.id).label('count')
-        ).group_by(Shipment.client_name).order_by(desc('count')).first()
+        ).filter(Shipment.is_deleted == False).group_by(Shipment.client_name).order_by(desc('count')).first()
         
         # 2. Status Distribution
         status_dist = db.query(
             Shipment.status,
             func.count(Shipment.id).label('count')
-        ).group_by(Shipment.status).all()
+        ).filter(Shipment.is_deleted == False).group_by(Shipment.status).all()
         
         status_distribution = [
             {"status": s[0], "count": s[1]} for s in status_dist if s[0]
@@ -385,6 +466,7 @@ def get_analytics():
             Shipment.recipient_city,
             func.count(Shipment.id).label('count')
         ).filter(Shipment.recipient_city.isnot(None))\
+         .filter(Shipment.is_deleted == False)\
          .group_by(Shipment.recipient_city)\
          .order_by(desc('count'))\
          .limit(10)\
@@ -399,6 +481,7 @@ def get_analytics():
             func.date(Shipment.date).label('date'),
             func.count(Shipment.id).label('count')
         ).filter(Shipment.date.isnot(None))\
+         .filter(Shipment.is_deleted == False)\
          .group_by(func.date(Shipment.date))\
          .order_by(func.date(Shipment.date))\
          .limit(30)\
@@ -447,8 +530,11 @@ def update_shipment_status(shipment_code: str, new_status: str):
     
     db = SessionLocal()
     try:
-        # Find the shipment
-        shipment = db.query(Shipment).filter(Shipment.shipment_code == shipment_code).first()
+        # Find the shipment (exclude deleted)
+        shipment = db.query(Shipment).filter(
+            Shipment.shipment_code == shipment_code,
+            Shipment.is_deleted == False
+        ).first()
         
         if not shipment:
             raise HTTPException(status_code=404, detail="Shipment not found")
@@ -494,8 +580,11 @@ def update_shipment(shipment_code: str, amount: float = None, description: str =
     
     db = SessionLocal()
     try:
-        # Find the shipment
-        shipment = db.query(Shipment).filter(Shipment.shipment_code == shipment_code).first()
+        # Find the shipment (exclude deleted)
+        shipment = db.query(Shipment).filter(
+            Shipment.shipment_code == shipment_code,
+            Shipment.is_deleted == False
+        ).first()
         
         if not shipment:
             raise HTTPException(status_code=404, detail="Shipment not found")
@@ -651,7 +740,10 @@ def get_shipments_by_file(
         if not file:
             raise HTTPException(status_code=404, detail="File not found")
             
-        query = db.query(Shipment).filter(Shipment.file_id == file_id)
+        query = db.query(Shipment).filter(
+            Shipment.file_id == file_id,
+            Shipment.is_deleted == False
+        )
         
         if search:
             search_term = f"%{search}%"
