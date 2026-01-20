@@ -1,0 +1,29 @@
+
+/* Appended styles for Settings Footer */
+.payment-settings-footer {
+  margin-top: 2rem;
+  display: flex;
+  justify-content: flex-end;
+  border-top: 1px solid var(--border-color);
+  padding-top: 1.5rem;
+}
+
+.settings-btn-footer {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-weight: 500;
+}
+
+.settings-btn-footer:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--text-primary);
+}

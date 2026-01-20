@@ -120,3 +120,4 @@ coverage.xml
 *.tmp
 *.temp
 .cache/
+.debug_env.py

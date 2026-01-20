@@ -7,7 +7,8 @@ import {
   AlertCircle, 
   Loader2, 
   FileSpreadsheet,
-  Trash2
+  Trash2,
+  Settings
 } from 'lucide-react'
 import FilesGridSkeleton from '../components/FilesGridSkeleton'
 import './PaymentProcessing.css'
@@ -251,6 +252,14 @@ function PaymentProcessingPage() {
             </div>
           )}
         </div>
+      </div>
+      
+      {/* Settings Footer */}
+      <div className="payment-settings-footer">
+        <button className="settings-btn-footer" onClick={() => navigate('/settings')} title="System Settings">
+          <Settings size={20} />
+          <span>Settings</span>
+        </button>
       </div>
     </div>
   )
