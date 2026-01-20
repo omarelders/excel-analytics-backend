@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom'
-import { Home, Calendar, List, CreditCard } from 'lucide-react'
+import { Home, Calendar, List, CreditCard, Settings } from 'lucide-react'
 import ThemeToggle from './ThemeToggle'
 import './Navbar.css'
 
@@ -36,7 +36,12 @@ function Navbar() {
               <span>Payment Processing</span>
             </NavLink>
           </li>
-
+          <li>
+            <NavLink to="/settings" className={({ isActive }) => isActive ? 'active' : ''}>
+              <Settings size={18} />
+              <span>Settings</span>
+            </NavLink>
+          </li>
         </ul>
         <ThemeToggle />
       </div>
