@@ -397,7 +397,8 @@
   margin-top: 2rem;
   display: flex;
   justify-content: flex-end;
-  border-top: 1px solid hsl(var(--border));
+  border-top: 1px solid #3d4556;
+  border-top: 1px solid hsl(var(--border, 210 11% 28%));
   padding-top: 1.5rem;
 }
 
@@ -405,9 +406,12 @@
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  background: transparent;
-  border: 1px solid hsl(var(--border));
-  color: hsl(var(--muted-foreground));
+  background: #252b3a;
+  background: hsl(var(--card, 210 11% 18%));
+  border: 1px solid #3d4556;
+  border: 1px solid hsl(var(--border, 210 11% 28%));
+  color: #9ca3af;
+  color: hsl(var(--muted-foreground, 210 9% 65%));
   padding: 0.5rem 1rem;
   border-radius: 6px;
   cursor: pointer;
@@ -417,7 +421,27 @@
 }
 
 .settings-btn-footer:hover {
-  background: hsl(var(--accent));
-  color: hsl(var(--foreground));
-  border-color: hsl(var(--foreground));
+  background: #343b4d;
+  background: hsl(var(--accent, 210 11% 24%));
+  color: #f7f8fa;
+  color: hsl(var(--foreground, 210 17% 98%));
+  border-color: #f7f8fa;
+  border-color: hsl(var(--foreground, 210 17% 98%));
+}
+
+/* Light theme overrides for settings button */
+[data-theme="light"] .payment-settings-footer {
+  border-top-color: #D1D5DB;
+}
+
+[data-theme="light"] .settings-btn-footer {
+  background: #FFFFFF;
+  border-color: #D1D5DB;
+  color: #64748B;
+}
+
+[data-theme="light"] .settings-btn-footer:hover {
+  background: #E5E7EB;
+  color: #1F2937;
+  border-color: #1F2937;
 }
