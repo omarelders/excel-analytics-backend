@@ -11,6 +11,7 @@ python-dotenv
 # Database
 sqlalchemy
 psycopg2-binary
+alembic
 
 # Data Processing
 pandas
@@ -20,4 +21,8 @@ openpyxl
 requests
 
 # Production Server
+# Production Server
 gunicorn
+
+# Push Notifications
+pywebpush

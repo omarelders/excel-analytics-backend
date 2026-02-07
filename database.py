@@ -1,6 +1,6 @@
 import os
 from datetime import datetime
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float, ForeignKey, Text, text, Boolean
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float, ForeignKey, Text, text, Boolean, LargeBinary
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from dotenv import load_dotenv
 
@@ -92,6 +92,37 @@ class Shipment(Base):
     
     # Relationship
     source_file = relationship("UploadedFile", back_populates="shipments")
+
+
+class Note(Base):
+    """Stores user notes with optional voice recordings"""
+    __tablename__ = "notes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, nullable=False)
+    content = Column(Text, nullable=True)           # For text notes
+    audio_data = Column(LargeBinary, nullable=True) # For voice notes (binary)
+    audio_duration = Column(Float, nullable=True)   # Duration in seconds
+    note_type = Column(String, default='text')      # 'text' or 'voice'
+    color = Column(String, default='yellow')
+    is_favorite = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ContentItem(Base):
+    """Stores content calendar items for social media planning"""
+    __tablename__ = "content_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    date = Column(String, index=True, nullable=False)  # Format: YYYY-MM-DD
+    title = Column(String, nullable=False)
+    content_type = Column(String, default='video')     # 'video' or 'photo'
+    platforms = Column(String, default='[]')           # JSON array as string
+    status = Column(String, default='To Shoot')        # Status workflow
+    visual_idea = Column(Text, nullable=True)          # Visual concept description
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class PaymentFile(Base):
@@ -186,6 +217,18 @@ class PaymentRecord(Base):
     
     # Relationship
     source_file = relationship("PaymentFile", back_populates="records")
+
+
+class PushSubscription(Base):
+    """Stores Web Push API subscriptions"""
+    __tablename__ = "push_subscriptions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    endpoint = Column(String, unique=True, index=True)
+    p256dh = Column(String, nullable=False)
+    auth = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 
 
 def create_tables():
