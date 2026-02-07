@@ -20,6 +20,9 @@ def save_upload(db: Session, filename: str, data: list, file_path: str = None):
     shipments_to_insert = []
     skipped_duplicates = 0
     skipped_delivered = 0
+    delivered_statuses = {"\u062a\u0645 \u0627\u0644\u062a\u0633\u0644\u064a\u0645", "delivered"}
+    status_key = "\u0627\u0644\u062d\u0627\u0644\u0629"
+    status_key_mojibake = status_key.encode("utf-8").decode("latin1")
     
     # Get existing shipment codes to check for duplicates
     existing_codes = set(
@@ -27,6 +30,16 @@ def save_upload(db: Session, filename: str, data: list, file_path: str = None):
     )
     
     for row in data:
+        # Read status defensively (supports both proper Arabic and mojibake keys)
+        row_status = row.get(status_key)
+        if row_status is None:
+            row_status = row.get(status_key_mojibake)
+
+        row_status_normalized = str(row_status).strip().lower() if row_status is not None else ""
+        if row_status_normalized in delivered_statuses:
+            skipped_delivered += 1
+            continue
+
 
         
         shipment_code = row.get("الكود")
@@ -52,7 +65,7 @@ def save_upload(db: Session, filename: str, data: list, file_path: str = None):
             date=parse_date(row.get("التاريخ")),
             client_name=row.get("العميل"),
             branch_name=row.get("الفرع"),
-            status=row.get("الحالة"),
+            status=row_status,
             
             # Sender
             sender_name=row.get("اسم الراسل"),
@@ -84,7 +97,7 @@ def save_upload(db: Session, filename: str, data: list, file_path: str = None):
     # 3. Check if any valid shipments remain
     if len(shipments_to_insert) == 0:
         db.rollback()
-        raise Exception("No valid shipments to upload. All rows are either delivered or duplicates.")
+        raise Exception("No valid shipments to upload. All rows are invalid, delivered, or duplicates.")
     
     # 4. Bulk Insert with transaction safety
     try:

@@ -416,6 +416,19 @@ def get_analytics():
             Shipment.client_name, 
             func.count(Shipment.id).label('count')
         ).filter(Shipment.is_deleted == False).group_by(Shipment.client_name).order_by(desc('count')).first()
+
+        # Distinct totals for dashboard KPIs
+        unique_clients = db.query(func.count(func.distinct(Shipment.client_name))).filter(
+            Shipment.is_deleted == False,
+            Shipment.client_name.isnot(None),
+            Shipment.client_name != ''
+        ).scalar() or 0
+
+        unique_cities = db.query(func.count(func.distinct(Shipment.recipient_city))).filter(
+            Shipment.is_deleted == False,
+            Shipment.recipient_city.isnot(None),
+            Shipment.recipient_city != ''
+        ).scalar() or 0
         
         # 2. Status Distribution
         status_dist = db.query(
@@ -442,17 +455,20 @@ def get_analytics():
             {"city": c[0], "count": c[1]} for c in cities_dist
         ]
         
-        # 4. Daily Trends (Last 30 days)
+        # 4. Daily Trends (Most recent 30 days)
         daily_trends_data = db.query(
             func.date(Shipment.date).label('date'),
             func.count(Shipment.id).label('count')
         ).filter(Shipment.date.isnot(None))\
          .filter(Shipment.is_deleted == False)\
          .group_by(func.date(Shipment.date))\
-         .order_by(func.date(Shipment.date))\
+         .order_by(func.date(Shipment.date).desc())\
          .limit(30)\
          .all()
-         
+
+        # Return oldest->newest for chart rendering while still using latest 30 days.
+        daily_trends_data = list(reversed(daily_trends_data))
+
         daily_trends = [
             {"date": str(d[0]), "count": d[1]} for d in daily_trends_data
         ]
@@ -464,7 +480,9 @@ def get_analytics():
                 "delivery_rate": delivery_rate,
                 "delivered_count": delivered_count,
                 "top_client": top_client_data[0] if top_client_data else None,
-                "top_client_count": top_client_data[1] if top_client_data else 0
+                "top_client_count": top_client_data[1] if top_client_data else 0,
+                "unique_clients": unique_clients,
+                "unique_cities": unique_cities,
             },
             "status_distribution": status_distribution,
             "top_cities": top_cities,
