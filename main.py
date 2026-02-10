@@ -25,14 +25,22 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Gold Road API", lifespan=lifespan)
 
 # CORS Configuration - allows frontend to communicate with backend
+# Read additional origins from environment (comma-separated)
+cors_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+# Add deployed frontend URL from environment variable
+extra_origins = os.environ.get("CORS_ORIGINS", "")
+if extra_origins:
+    cors_origins.extend([o.strip() for o in extra_origins.split(",") if o.strip()])
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
