@@ -31,6 +31,8 @@ cors_origins = [
     "http://127.0.0.1:5173",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "https://roadtoonemillion.me",
+    "https://www.roadtoonemillion.me",
 ]
 
 # Add deployed frontend URL from environment variable
