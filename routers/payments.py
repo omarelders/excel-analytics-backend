@@ -4,9 +4,10 @@ Payments Router - Payment processing endpoints
 import os
 import uuid
 import pandas as pd
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from dependencies import get_current_user
 
-router = APIRouter(prefix="/payments", tags=["payments"])
+router = APIRouter(prefix="/payments", tags=["payments"], dependencies=[Depends(get_current_user)])
 
 # Configuration
 UPLOAD_DIR = "uploads"
@@ -66,7 +67,8 @@ def delete_payment_file(file_id: int):
         }
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to delete: {str(e)}")
+        print(f"Error deleting payment file: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete payment file")
     finally:
         db.close()
 
@@ -249,7 +251,7 @@ async def upload_payment_file(file: UploadFile = File(...)):
         print(f"✅ File saved: {file_path}")
     except Exception as e:
         print(f"❌ Failed to save file: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to save file")
     
     # 4. Parse Excel
     print("Step 4: Parsing Excel file...")
@@ -259,7 +261,7 @@ async def upload_payment_file(file: UploadFile = File(...)):
         print(f"   Columns: {list(df.columns)[:5]}... (showing first 5)")
     except Exception as e:
         print(f"❌ Failed to parse Excel: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to parse Excel: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to parse Excel file")
     
     # 5. Save to database
     print("Step 5: Saving to database...")
@@ -386,6 +388,6 @@ async def upload_payment_file(file: UploadFile = File(...)):
         db.rollback()
         print(f"❌ DATABASE ERROR: {str(e)}")
         print(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to process payment file")
     finally:
         db.close()

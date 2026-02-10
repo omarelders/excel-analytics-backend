@@ -3,10 +3,11 @@ Shipments Router - All shipment-related endpoints
 """
 import os
 import uuid
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from constants import CHANGEABLE_STATUSES, TARGET_STATUSES
+from dependencies import get_current_user
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_current_user)])
 
 # Configuration
 UPLOAD_DIR = "uploads"
@@ -120,7 +121,8 @@ def delete_shipment(shipment_code: str):
         raise
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to delete shipment: {str(e)}")
+        print(f"Error deleting shipment: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete shipment")
     finally:
         db.close()
 
@@ -151,7 +153,8 @@ def restore_shipment(shipment_code: str):
         raise
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to restore shipment: {str(e)}")
+        print(f"Error restoring shipment: {e}")
+        raise HTTPException(status_code=500, detail="Failed to restore shipment")
     finally:
         db.close()
 
@@ -545,7 +548,8 @@ def update_shipment_status(shipment_code: str, new_status: str):
         raise
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to update status: {str(e)}")
+        print(f"Error updating status: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update status")
     finally:
         db.close()
 
@@ -598,7 +602,8 @@ def update_shipment(shipment_code: str, amount: float = None, description: str =
         raise
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to update shipment: {str(e)}")
+        print(f"Error updating shipment: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update shipment")
     finally:
         db.close()
 
@@ -652,7 +657,8 @@ async def upload_file(file: UploadFile = File(...)):
             db.close()
 
     except Exception as e:
-        return {"filename": file.filename, "status": "error", "message": f"Error processing file: {str(e)}"}
+        print(f"Error processing file: {e}")
+        return {"filename": file.filename, "status": "error", "message": "Error processing file"}
 
 
 # ========== SHIPMENT FILES ENDPOINTS ==========
@@ -700,7 +706,8 @@ def delete_uploaded_file(file_id: int):
         return {"message": f"Deleted file {filename} and its shipments", "file_id": file_id}
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to delete file: {str(e)}")
+        print(f"Error deleting file: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete file")
     finally:
         db.close()
 

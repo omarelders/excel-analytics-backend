@@ -8,10 +8,12 @@ import base64
 
 from database import SessionLocal, PushSubscription
 from push_config import get_vapid_keys, send_push_notification
+from dependencies import get_current_user
 
 router = APIRouter(
     prefix="/notifications",
     tags=["notifications"],
+    dependencies=[Depends(get_current_user)],
     responses={404: {"description": "Not found"}},
 )
 

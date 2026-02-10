@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from constants import CHANGEABLE_STATUSES, TARGET_STATUSES, ALL_STATUSES, STATUS_COLORS
 
 # Import routers
-from routers import shipments, payments, notes, content, notifications
+from routers import shipments, payments, notes, content, notifications, auth
 
 
 @asynccontextmanager
@@ -27,7 +27,12 @@ app = FastAPI(title="Gold Road API", lifespan=lifespan)
 # CORS Configuration - allows frontend to communicate with backend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific origins
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -72,3 +77,6 @@ app.include_router(content.router)
 
 # Notifications router - push notifications
 app.include_router(notifications.router)
+
+# Auth router - login/logout/session management
+app.include_router(auth.router)

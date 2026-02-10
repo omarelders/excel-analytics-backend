@@ -3,10 +3,11 @@ Content Calendar Router - Content calendar endpoints
 """
 import json
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
+from dependencies import get_current_user
 
-router = APIRouter(prefix="/api/content", tags=["content"])
+router = APIRouter(prefix="/api/content", tags=["content"], dependencies=[Depends(get_current_user)])
 
 
 class ContentItemCreate(BaseModel):
@@ -69,7 +70,8 @@ def get_content_items(
         
         return {"data": result, "total": len(result)}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch content items: {str(e)}")
+        print(f"Error fetching content items: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch content items")
     finally:
         db.close()
 
@@ -106,7 +108,8 @@ def create_content_item(item: ContentItemCreate):
         }
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to create content item: {str(e)}")
+        print(f"Error creating content item: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create content item")
     finally:
         db.close()
 
@@ -161,7 +164,8 @@ def update_content_item(item_id: int, item_update: ContentItemUpdate):
         raise
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to update content item: {str(e)}")
+        print(f"Error updating content item: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update content item")
     finally:
         db.close()
 
@@ -185,7 +189,8 @@ def delete_content_item(item_id: int):
         raise
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to delete content item: {str(e)}")
+        print(f"Error deleting content item: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete content item")
     finally:
         db.close()
 
@@ -211,6 +216,7 @@ def move_content_item(item_id: int, new_date: str):
         raise
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to move content item: {str(e)}")
+        print(f"Error moving content item: {e}")
+        raise HTTPException(status_code=500, detail="Failed to move content item")
     finally:
         db.close()

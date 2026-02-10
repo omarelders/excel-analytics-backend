@@ -26,3 +26,7 @@ gunicorn
 
 # Push Notifications
 pywebpush
+
+# Authentication
+passlib[bcrypt]
+bcrypt

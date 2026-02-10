@@ -230,6 +230,30 @@ class PushSubscription(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class User(Base):
+    """Application user for authentication"""
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, nullable=False, index=True)
+    password_hash = Column(String, nullable=False)
+
+    # One-to-Many: one user can have many concurrent sessions
+    sessions = relationship("UserSession", back_populates="user", cascade="all, delete-orphan")
+
+
+class UserSession(Base):
+    """Tracks individual login sessions — one row per device/browser"""
+    __tablename__ = "user_sessions"
+
+    token = Column(String, primary_key=True, index=True)          # UUID4 string
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+
+    # Many-to-One back to User
+    user = relationship("User", back_populates="sessions")
+
 
 def create_tables():
     if engine is None:

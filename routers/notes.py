@@ -3,10 +3,11 @@ Notes Router - Notes/Ideas endpoints
 """
 import base64
 from typing import Optional
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
+from dependencies import get_current_user
 
-router = APIRouter(prefix="/api/notes", tags=["notes"])
+router = APIRouter(prefix="/api/notes", tags=["notes"], dependencies=[Depends(get_current_user)])
 
 
 class NoteCreate(BaseModel):
@@ -126,7 +127,8 @@ def create_note(note: NoteCreate):
         raise
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to create note: {str(e)}")
+        print(f"Error creating note: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create note")
     finally:
         db.close()
 
@@ -213,7 +215,8 @@ def update_note(note_id: int, note_update: NoteUpdate):
         raise
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to update note: {str(e)}")
+        print(f"Error updating note: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update note")
     finally:
         db.close()
 
@@ -237,7 +240,8 @@ def delete_note(note_id: int):
         raise
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to delete note: {str(e)}")
+        print(f"Error deleting note: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete note")
     finally:
         db.close()
 
@@ -267,6 +271,7 @@ def toggle_note_favorite(note_id: int):
         raise
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to toggle favorite: {str(e)}")
+        print(f"Error toggling favorite: {e}")
+        raise HTTPException(status_code=500, detail="Failed to toggle favorite")
     finally:
         db.close()
