@@ -2,6 +2,7 @@
 Auth Router — Login / Logout / Me endpoints
 Supports multi-device sessions via per-token rows in user_sessions table.
 """
+import os
 import uuid
 import bcrypt
 from datetime import datetime, timedelta
@@ -12,6 +13,9 @@ from fastapi import APIRouter, HTTPException, Response, Request, Form, Depends
 from dependencies import get_current_user
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+# Check environment - Default to False (Development) if not set
+IS_PRODUCTION = os.getenv("ENV") == "production"
 
 # Session durations
 REMEMBER_ME_SECONDS = 315_360_000  # 10 years
@@ -77,11 +81,14 @@ def login(
 
         # 6. Set HttpOnly cookie
         max_age = REMEMBER_ME_SECONDS if remember_me else DEFAULT_SESSION_SECONDS
+        
+        # NOTE: secure=True is required for HTTPS (production), but breaks HTTP (local dev)
+        # We use IS_PRODUCTION to toggle this automatically.
         response.set_cookie(
             key="session_token",
             value=token,
             httponly=True,
-            secure=True,
+            secure=IS_PRODUCTION,
             samesite="lax",
             max_age=max_age,
             path="/",
@@ -126,7 +133,7 @@ def logout(request: Request, response: Response):
             key="session_token",
             path="/",
             httponly=True,
-            secure=True,
+            secure=IS_PRODUCTION,
             samesite="lax",
         )
 
