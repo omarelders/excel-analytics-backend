@@ -84,6 +84,7 @@ def login(
         
         # NOTE: secure=True is required for HTTPS (production), but breaks HTTP (local dev)
         # We use IS_PRODUCTION to toggle this automatically.
+        print(f"DEBUG: Login successful for {user.username}. Setting cookie: token={token}, secure={IS_PRODUCTION}, max_age={max_age}")
         response.set_cookie(
             key="session_token",
             value=token,
@@ -103,6 +104,7 @@ def login(
     except HTTPException:
         raise
     except Exception as e:
+        print(f"DEBUG: Login failed with exception: {str(e)}")
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Login failed: {str(e)}")
     finally:
