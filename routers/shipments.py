@@ -77,13 +77,25 @@ def get_shipments(
                 "الكود": s.shipment_code,
                 "التاريخ": str(s.date) if s.date else None,
                 "العميل": s.client_name,
+                "الفرع": s.branch_name,
                 "الوصف": s.description,
                 "الحالة": s.status,
+                "اسم الراسل": s.sender_name,
+                "مدينة الراسل": s.sender_city,
                 "المستلم": s.recipient_name,
                 "مدينة المستلم": s.recipient_city,
+                "منطقة المستلم": s.recipient_area,
+                "عنوان المستلم": s.recipient_address,
+                "هاتف المستلم": s.recipient_phone,
+                "موبايل المستلم": s.recipient_mobile,
                 "قيمة الطرد": s.amount,
+                "الرسوم": s.shipping_fee,
+                "صافي سعر الطرد": s.net_price,
+                "القيمة الإجمالية": s.total_value,
                 "نوع السعر": s.price_type,
-                "الوزن": s.weight
+                "الوزن": s.weight,
+                "عدد القطع": s.pieces_count,
+                "ملاحظات": s.notes
             })
         
         return {
@@ -244,13 +256,25 @@ def get_shipments_by_day(date: str):
                 "الكود": s.shipment_code,
                 "التاريخ": str(s.date) if s.date else None,
                 "العميل": s.client_name,
+                "الفرع": s.branch_name,
                 "الوصف": s.description,
                 "الحالة": s.status,
+                "اسم الراسل": s.sender_name,
+                "مدينة الراسل": s.sender_city,
                 "المستلم": s.recipient_name,
                 "مدينة المستلم": s.recipient_city,
+                "منطقة المستلم": s.recipient_area,
+                "عنوان المستلم": s.recipient_address,
+                "هاتف المستلم": s.recipient_phone,
+                "موبايل المستلم": s.recipient_mobile,
                 "قيمة الطرد": s.amount,
+                "الرسوم": s.shipping_fee,
+                "صافي سعر الطرد": s.net_price,
+                "القيمة الإجمالية": s.total_value,
                 "نوع السعر": s.price_type,
-                "الوزن": s.weight
+                "الوزن": s.weight,
+                "عدد القطع": s.pieces_count,
+                "ملاحظات": s.notes
             })
         
         return {
@@ -295,13 +319,25 @@ def search_shipments_global(query: str, limit: int = 50):
                 "الكود": s.shipment_code,
                 "التاريخ": str(s.date) if s.date else None,
                 "العميل": s.client_name,
+                "الفرع": s.branch_name,
                 "الوصف": s.description,
                 "الحالة": s.status,
+                "اسم الراسل": s.sender_name,
+                "مدينة الراسل": s.sender_city,
                 "المستلم": s.recipient_name,
                 "مدينة المستلم": s.recipient_city,
+                "منطقة المستلم": s.recipient_area,
+                "عنوان المستلم": s.recipient_address,
+                "هاتف المستلم": s.recipient_phone,
+                "موبايل المستلم": s.recipient_mobile,
                 "قيمة الطرد": s.amount,
+                "الرسوم": s.shipping_fee,
+                "صافي سعر الطرد": s.net_price,
+                "القيمة الإجمالية": s.total_value,
                 "نوع السعر": s.price_type,
-                "الوزن": s.weight
+                "الوزن": s.weight,
+                "عدد القطع": s.pieces_count,
+                "ملاحظات": s.notes
             })
         
         return {
@@ -756,13 +792,25 @@ def get_shipments_by_file(
                 "الكود": s.shipment_code,
                 "التاريخ": str(s.date) if s.date else None,
                 "العميل": s.client_name,
+                "الفرع": s.branch_name,
                 "الوصف": s.description,
                 "الحالة": s.status,
+                "اسم الراسل": s.sender_name,
+                "مدينة الراسل": s.sender_city,
                 "المستلم": s.recipient_name,
                 "مدينة المستلم": s.recipient_city,
+                "منطقة المستلم": s.recipient_area,
+                "عنوان المستلم": s.recipient_address,
+                "هاتف المستلم": s.recipient_phone,
+                "موبايل المستلم": s.recipient_mobile,
                 "قيمة الطرد": s.amount,
+                "الرسوم": s.shipping_fee,
+                "صافي سعر الطرد": s.net_price,
+                "القيمة الإجمالية": s.total_value,
                 "نوع السعر": s.price_type,
-                "الوزن": s.weight
+                "الوزن": s.weight,
+                "عدد القطع": s.pieces_count,
+                "ملاحظات": s.notes
             })
             
         return {
