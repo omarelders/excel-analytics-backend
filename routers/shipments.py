@@ -433,9 +433,9 @@ def get_analytics():
         # 1. Summary Stats (exclude deleted)
         total_shipments = db.query(Shipment).filter(Shipment.is_deleted == False).count()
         
-        # Total Value (sum of amount) - excluding returned orders (مرتجع) and deleted
+        # Total Value (sum of amount) - excluding returned orders (مرتجع and ارتجاع للراسل) and deleted
         total_value = db.query(func.sum(Shipment.amount)).filter(
-            Shipment.status != 'مرتجع',
+            Shipment.status.notin_(['مرتجع', 'ارتجاع للراسل']),
             Shipment.is_deleted == False
         ).scalar() or 0
         
@@ -694,7 +694,8 @@ async def upload_file(file: UploadFile = File(...)):
 
     except Exception as e:
         print(f"Error processing file: {e}")
-        return {"filename": file.filename, "status": "error", "message": "Error processing file"}
+        error_message = str(e).strip() or "Error processing file"
+        return {"filename": file.filename, "status": "error", "message": error_message}
 
 
 # ========== SHIPMENT FILES ENDPOINTS ==========

@@ -13,7 +13,8 @@ CHANGEABLE_STATUSES = [
     "مرتجع",
     "تسليم جزئي",
     "ملغى",
-    "تم الارجاع للراسل"
+    "تم الارجاع للراسل",
+    "ارتجاع للراسل"
 ]
 
 # Statuses that orders can be changed TO (target statuses)
@@ -21,7 +22,8 @@ TARGET_STATUSES = [
     "تم التسليم",
     "مرتجع",
     "تسليم جزئي",
-    "قيد التوصيل"
+    "قيد التوصيل",
+    "ارتجاع للراسل"
 ]
 
 # All possible statuses in the system
@@ -37,5 +39,6 @@ STATUS_COLORS = {
     "ملغى": "error",
     "قيد التوصيل": "info",
     "تسليم جزئي": "warning",
-    "تم الارجاع للراسل": "warning"
+    "تم الارجاع للراسل": "warning",
+    "ارتجاع للراسل": "warning"
 }

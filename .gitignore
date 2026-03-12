@@ -5,6 +5,7 @@
 .env.local
 .env.*.local
 *.env
+vapid_keys.json
 
 # ===========================
 # Python
