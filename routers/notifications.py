@@ -1,14 +1,13 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request, BackgroundTasks
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional
 import json
 import base64
 
-
 from database import SessionLocal, PushSubscription
 from push_config import get_vapid_keys, send_push_notification
-from dependencies import get_current_user
+from dependencies import get_current_user, require_admin, limiter
 
 router = APIRouter(
     prefix="/notifications",
@@ -26,13 +25,38 @@ def get_db():
         db.close()
 
 class SubscriptionSchema(BaseModel):
-    endpoint: str
+    endpoint: str = Field(..., min_length=1, max_length=2048)
     keys: dict
 
 class NotificationSchema(BaseModel):
-    title: str
-    body: str
-    url: Optional[str] = "/"
+    title: str = Field(..., min_length=1, max_length=255)
+    body: str = Field(..., min_length=1, max_length=1000)
+    url: Optional[str] = Field("/", max_length=1000)
+
+
+def _broadcast_push_worker(message: str):
+    """Background task to broadcast push notifications without blocking HTTP worker"""
+    db = SessionLocal()
+    try:
+        subs = db.query(PushSubscription).all()
+        for sub in subs:
+            sub_info = {
+                "endpoint": sub.endpoint,
+                "keys": {
+                    "p256dh": sub.p256dh,
+                    "auth": sub.auth
+                }
+            }
+            try:
+                result = send_push_notification(sub_info, message)
+                if result == "GONE":
+                    db.delete(sub)  # Cleanup invalid subscription
+            except Exception:
+                pass
+        db.commit()
+    finally:
+        db.close()
+
 
 @router.get("/vapid-key")
 def get_vapid_public_key():
@@ -74,10 +98,16 @@ def unsubscribe(subscription: SubscriptionSchema, db: Session = Depends(get_db))
     return {"message": "Unsubscribed successfully"}
 
 @router.post("/send")
-def send_notification(notification: NotificationSchema, db: Session = Depends(get_db)):
-    """Admin endpoint to send notification to ALL subscribers"""
-    subs = db.query(PushSubscription).all()
-    count = 0
+@limiter.limit("1/minute")
+def send_notification(
+    request: Request,
+    notification: NotificationSchema,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Admin endpoint to asynchronously broadcast notification to ALL subscribers"""
+    subs_count = db.query(PushSubscription).count()
     
     message = json.dumps({
         "title": notification.title,
@@ -86,21 +116,8 @@ def send_notification(notification: NotificationSchema, db: Session = Depends(ge
         "icon": "/icon-192x192.png"
     })
     
-    for sub in subs:
-        sub_info = {
-            "endpoint": sub.endpoint,
-            "keys": {
-                "p256dh": sub.p256dh,
-                "auth": sub.auth
-            }
-        }
-        result = send_push_notification(sub_info, message)
-        if result == "GONE":
-            db.delete(sub) # Cleanup invalid subscription
-        elif result:
-            count += 1
-            
-    db.commit()
-    return {"message": f"Sent to {count} subscribers"}
+    background_tasks.add_task(_broadcast_push_worker, message)
+    return {"message": f"Sent to {subs_count} subscribers"}
+
 
 

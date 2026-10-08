@@ -17,7 +17,7 @@ if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
 # Validate database configuration on startup
 if not DATABASE_URL:
     raise RuntimeError(
-        "❌ DATABASE_URL is not set! "
+        "[ERROR] DATABASE_URL is not set! "
         "Please create a .env file with DATABASE_URL=your_connection_string"
     )
 
@@ -237,6 +237,8 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String, unique=True, nullable=False, index=True)
     password_hash = Column(String, nullable=False)
+    role = Column(String, default="user", nullable=False)
+    is_admin = Column(Boolean, default=False, nullable=False)
 
     # One-to-Many: one user can have many concurrent sessions
     sessions = relationship("UserSession", back_populates="user", cascade="all, delete-orphan")
@@ -246,7 +248,7 @@ class UserSession(Base):
     """Tracks individual login sessions — one row per device/browser"""
     __tablename__ = "user_sessions"
 
-    token = Column(String, primary_key=True, index=True)          # UUID4 string
+    token = Column(String(64), primary_key=True, index=True)          # SHA-256 hash of session token
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     expires_at = Column(DateTime, nullable=False)

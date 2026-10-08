@@ -3,9 +3,9 @@ Shipments Router - All shipment-related endpoints
 """
 import os
 import uuid
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query, Request
 from constants import CHANGEABLE_STATUSES, TARGET_STATUSES
-from dependencies import get_current_user
+from dependencies import get_current_user, require_admin, limiter
 
 router = APIRouter(dependencies=[Depends(get_current_user)])
 
@@ -17,8 +17,8 @@ ALLOWED_EXTENSIONS = [".xlsx"]
 
 @router.get("/shipments")
 def get_shipments(
-    limit: int = 20,
-    offset: int = 0,
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
     search: str = None,
     status: str = None,
     date_from: str = None,
@@ -172,7 +172,7 @@ def restore_shipment(shipment_code: str):
 
 
 @router.get("/shipments/deleted")
-def get_deleted_shipments(limit: int = 50, offset: int = 0):
+def get_deleted_shipments(limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0)):
     """Returns list of soft-deleted shipments for recovery."""
     from database import SessionLocal, Shipment
     
@@ -287,7 +287,7 @@ def get_shipments_by_day(date: str):
 
 
 @router.get("/shipments/search")
-def search_shipments_global(query: str, limit: int = 50):
+def search_shipments_global(query: str, limit: int = Query(50, ge=1, le=100)):
     """Search shipments across all days by code, client, recipient, or description"""
     from database import SessionLocal, Shipment
     from sqlalchemy import or_
@@ -350,7 +350,7 @@ def search_shipments_global(query: str, limit: int = 50):
 
 
 @router.get("/shipments/autocomplete")
-def autocomplete_shipments(query: str, limit: int = 10):
+def autocomplete_shipments(query: str, limit: int = Query(10, ge=1, le=100)):
     """
     Autocomplete search for code, client, recipient, and city.
     Returns categorized suggestions.
@@ -645,57 +645,81 @@ def update_shipment(shipment_code: str, amount: float = None, description: str =
 
 
 @router.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
+@limiter.limit("5/minute")
+async def upload_file(request: Request, file: UploadFile = File(...)):
     # 1. Validate file extension
-    file_ext = os.path.splitext(file.filename)[1].lower()
+    filename = file.filename or ""
+    file_ext = os.path.splitext(filename)[1].lower()
     if file_ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"Invalid file type. Only {', '.join(ALLOWED_EXTENSIONS)} files are allowed.")
     
-    # 2. Check file size (read content to check size)
-    contents = await file.read()
-    file_size_mb = len(contents) / (1024 * 1024)
-    if file_size_mb > MAX_FILE_SIZE_MB:
-        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE_MB}MB.")
-    
-    # 3. Generate unique filename to avoid overwrites
-    unique_id = str(uuid.uuid4())[:8]
-    safe_filename = f"{unique_id}_{file.filename}"
-    file_path = os.path.join(UPLOAD_DIR, safe_filename)
-    
-    # 4. Save the file to disk
-    with open(file_path, "wb") as buffer:
-        buffer.write(contents)
-        
-    # Parse the file
-    try:
-        from parser import parse_excel
-        from database import SessionLocal
-        import crud
-        
-        # 1. Parsing
-        result = parse_excel(file_path)
-        parsed_data = result["preview_data"] 
-        
-        # A) Get DB Session
-        db = SessionLocal()
-        try:
-            # B) Save to DB
-            result = crud.save_upload(db, file.filename, parsed_data)
-            return {
-                "file_id": result["file_id"],
-                "filename": file.filename,
-                "status": "success", 
-                "message": "File uploaded and data inserted successfully!",
-                "rows_inserted": result["inserted"],
-                "duplicates_skipped": result["skipped_duplicates"]
-            }
-        finally:
-            db.close()
+    # 2. Check file size & validate file signature via streaming chunks
+    CHUNK_SIZE = 64 * 1024  # 64KB
+    max_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
+    total_bytes = 0
+    first_chunk = True
 
-    except Exception as e:
-        print(f"Error processing file: {e}")
-        error_message = str(e).strip() or "Error processing file"
-        return {"filename": file.filename, "status": "error", "message": error_message}
+    # 3. Generate unique filename to avoid overwrites and path traversal
+    safe_filename = f"{uuid.uuid4().hex}{file_ext}"
+    file_path = os.path.join(UPLOAD_DIR, safe_filename)
+
+    try:
+        try:
+            with open(file_path, "wb") as buffer:
+                while True:
+                    chunk = await file.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    total_bytes += len(chunk)
+                    if total_bytes > max_bytes:
+                        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE_MB}MB.")
+                    if first_chunk:
+                        first_chunk = False
+                        if len(chunk) < 4 or not chunk.startswith(b"\x50\x4b\x03\x04"):
+                            raise HTTPException(status_code=400, detail="Invalid Excel file format. File signature mismatch.")
+                    buffer.write(chunk)
+
+            if total_bytes == 0:
+                raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+        except Exception:
+            raise
+            
+        # Parse the file
+        try:
+            from parser import parse_excel
+            from database import SessionLocal
+            import crud
+            
+            # 1. Parsing
+            result = parse_excel(file_path)
+            parsed_data = result["preview_data"] 
+            
+            # A) Get DB Session
+            db = SessionLocal()
+            try:
+                # B) Save to DB
+                result = crud.save_upload(db, filename, parsed_data)
+                return {
+                    "file_id": result["file_id"],
+                    "filename": filename,
+                    "status": "success", 
+                    "message": "File uploaded and data inserted successfully!",
+                    "rows_inserted": result["inserted"],
+                    "duplicates_skipped": result["skipped_duplicates"]
+                }
+            finally:
+                db.close()
+
+        except Exception as e:
+            print(f"Error processing file: {e}")
+            return {"filename": filename, "status": "error", "message": "Failed to parse or process Excel file"}
+    finally:
+        # Prevent disk exhaustion: delete temporary upload file after processing
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
 
 
 # ========== SHIPMENT FILES ENDPOINTS ==========
@@ -726,8 +750,8 @@ def get_uploaded_files():
 
 
 @router.delete("/upload/files/{file_id}")
-def delete_uploaded_file(file_id: int):
-    """Delete an uploaded file and all its shipments (cascading)"""
+def delete_uploaded_file(file_id: int, current_user: dict = Depends(require_admin)):
+    """Delete an uploaded file and all its shipments (cascading) - Admin only"""
     from database import SessionLocal, UploadedFile
     
     db = SessionLocal()
@@ -741,6 +765,8 @@ def delete_uploaded_file(file_id: int):
         db.commit()
         
         return {"message": f"Deleted file {filename} and its shipments", "file_id": file_id}
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
         print(f"Error deleting file: {e}")
@@ -752,8 +778,8 @@ def delete_uploaded_file(file_id: int):
 @router.get("/shipments/file/{file_id}")
 def get_shipments_by_file(
     file_id: int,
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
     search: str = None
 ):
     """Get shipments belonging to a specific file"""

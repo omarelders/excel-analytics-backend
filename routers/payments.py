@@ -4,8 +4,8 @@ Payments Router - Payment processing endpoints
 import os
 import uuid
 import pandas as pd
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
-from dependencies import get_current_user
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query, Request
+from dependencies import get_current_user, require_admin, limiter
 
 router = APIRouter(prefix="/payments", tags=["payments"], dependencies=[Depends(get_current_user)])
 
@@ -39,8 +39,8 @@ def get_payment_files():
 
 
 @router.delete("/files/{file_id}")
-def delete_payment_file(file_id: int):
-    """Delete a payment file and all its records"""
+def delete_payment_file(file_id: int, current_user: dict = Depends(require_admin)):
+    """Delete a payment file and all its records - Admin only"""
     from database import SessionLocal, PaymentFile, PaymentRecord
     
     db = SessionLocal()
@@ -65,6 +65,8 @@ def delete_payment_file(file_id: int):
             "status": "success",
             "message": f"Deleted {filename} and {deleted_records} records"
         }
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
         print(f"Error deleting payment file: {e}")
@@ -76,8 +78,8 @@ def delete_payment_file(file_id: int):
 @router.get("/files/{file_id}/data")
 def get_payment_file_data(
     file_id: int,
-    limit: int = 20,
-    offset: int = 0,
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
     search: str = None
 ):
     """Returns records from a specific payment file with pagination, search, and stats"""
@@ -211,56 +213,77 @@ def get_payment_file_data(
 
 
 @router.post("/upload")
-async def upload_payment_file(file: UploadFile = File(...)):
+@limiter.limit("5/minute")
+async def upload_payment_file(request: Request, file: UploadFile = File(...)):
     """Upload and parse a payment Excel file"""
     from database import SessionLocal, PaymentFile, PaymentRecord
     from datetime import datetime
-    import traceback
     
     print(f"\n{'='*50}")
-    print(f"📤 PAYMENT UPLOAD STARTED: {file.filename}")
+    filename = file.filename or ""
+    print(f"[INFO] PAYMENT UPLOAD STARTED: {filename}")
     print(f"{'='*50}")
     
     # 1. Validate file extension
     print("Step 1: Validating file extension...")
-    file_ext = os.path.splitext(file.filename)[1].lower()
+    file_ext = os.path.splitext(filename)[1].lower()
     if file_ext not in ALLOWED_EXTENSIONS:
-        print(f"❌ Invalid file type: {file_ext}")
+        print(f"[ERROR] Invalid file type: {file_ext}")
         raise HTTPException(status_code=400, detail=f"Invalid file type. Only {', '.join(ALLOWED_EXTENSIONS)} files are allowed.")
-    print(f"✅ File extension OK: {file_ext}")
+    print(f"[INFO] File extension OK: {file_ext}")
     
-    # 2. Check file size
-    print("Step 2: Checking file size...")
-    contents = await file.read()
-    file_size_mb = len(contents) / (1024 * 1024)
-    print(f"   File size: {file_size_mb:.2f} MB")
-    if file_size_mb > MAX_FILE_SIZE_MB:
-        print(f"❌ File too large")
-        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE_MB}MB.")
-    print("✅ File size OK")
-    
-    # 3. Save file to disk
-    print("Step 3: Saving file to disk...")
-    unique_id = str(uuid.uuid4())[:8]
-    safe_filename = f"payment_{unique_id}_{file.filename}"
+    # 2. Check file size & validate file signature via streaming chunks
+    print("Step 2 & 3: Streaming file to disk with size & magic byte validation...")
+    CHUNK_SIZE = 64 * 1024  # 64KB
+    max_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
+    total_bytes = 0
+    first_chunk = True
+
+    safe_filename = f"payment_{uuid.uuid4().hex}{file_ext}"
     file_path = os.path.join(UPLOAD_DIR, safe_filename)
-    
+
     try:
         with open(file_path, "wb") as buffer:
-            buffer.write(contents)
-        print(f"✅ File saved: {file_path}")
-    except Exception as e:
-        print(f"❌ Failed to save file: {e}")
-        raise HTTPException(status_code=500, detail="Failed to save file")
+            while True:
+                chunk = await file.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                total_bytes += len(chunk)
+                if total_bytes > max_bytes:
+                    print("[ERROR] File too large")
+                    raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE_MB}MB.")
+                if first_chunk:
+                    first_chunk = False
+                    if len(chunk) < 4 or not chunk.startswith(b"\x50\x4b\x03\x04"):
+                        print("[ERROR] Invalid file signature (not OpenXML/ZIP)")
+                        raise HTTPException(status_code=400, detail="Invalid Excel file format. File signature mismatch.")
+                buffer.write(chunk)
+
+        if total_bytes == 0:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    except Exception:
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
+        raise
+
+    print(f"[INFO] File saved: {file_path}")
     
     # 4. Parse Excel
     print("Step 4: Parsing Excel file...")
     try:
         df = pd.read_excel(file_path)
-        print(f"✅ Excel parsed: {len(df)} rows, {len(df.columns)} columns")
+        print(f"[INFO] Excel parsed: {len(df)} rows, {len(df.columns)} columns")
         print(f"   Columns: {list(df.columns)[:5]}... (showing first 5)")
     except Exception as e:
-        print(f"❌ Failed to parse Excel: {e}")
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
+        print(f"[ERROR] Failed to parse Excel: {e}")
         raise HTTPException(status_code=500, detail="Failed to parse Excel file")
     
     # 5. Save to database
@@ -385,9 +408,18 @@ async def upload_payment_file(file: UploadFile = File(...)):
         }
         
     except Exception as e:
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
         db.rollback()
-        print(f"❌ DATABASE ERROR: {str(e)}")
-        print(traceback.format_exc())
+        print(f"[ERROR] DATABASE ERROR: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to process payment file")
     finally:
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
         db.close()

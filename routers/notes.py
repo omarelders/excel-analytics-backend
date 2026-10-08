@@ -3,35 +3,35 @@ Notes Router - Notes/Ideas endpoints
 """
 import base64
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Depends, Query
+from pydantic import BaseModel, Field
 from dependencies import get_current_user
 
 router = APIRouter(prefix="/api/notes", tags=["notes"], dependencies=[Depends(get_current_user)])
 
 
 class NoteCreate(BaseModel):
-    title: str
-    content: Optional[str] = None
-    audio_data: Optional[str] = None  # Base64 encoded audio
-    audio_duration: Optional[float] = None
-    note_type: str = "text"  # 'text' or 'voice'
-    color: str = "yellow"
+    title: str = Field(..., min_length=1, max_length=255)
+    content: Optional[str] = Field(None, max_length=10000)
+    audio_data: Optional[str] = Field(None, max_length=10_000_000)  # Base64 encoded audio
+    audio_duration: Optional[float] = Field(None, ge=0)
+    note_type: str = Field("text", max_length=50)  # 'text' or 'voice'
+    color: str = Field("yellow", max_length=50)
 
 
 class NoteUpdate(BaseModel):
-    title: Optional[str] = None
-    content: Optional[str] = None
-    audio_data: Optional[str] = None
-    audio_duration: Optional[float] = None
-    color: Optional[str] = None
+    title: Optional[str] = Field(None, min_length=1, max_length=255)
+    content: Optional[str] = Field(None, max_length=10000)
+    audio_data: Optional[str] = Field(None, max_length=10_000_000)
+    audio_duration: Optional[float] = Field(None, ge=0)
+    color: Optional[str] = Field(None, max_length=50)
 
 
 @router.get("")
 def get_notes(
     favorites_only: bool = False,
-    limit: int = 100,
-    offset: int = 0
+    limit: int = Query(100, ge=1, le=100),
+    offset: int = Query(0, ge=0)
 ):
     """Returns list of all notes with optional favorites filter"""
     from database import SessionLocal, Note
@@ -88,8 +88,8 @@ def create_note(note: NoteCreate):
         if note.audio_data:
             try:
                 audio_bytes = base64.b64decode(note.audio_data)
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=f"Invalid audio data: {str(e)}")
+            except Exception:
+                raise HTTPException(status_code=400, detail="Invalid audio data")
         
         new_note = Note(
             title=note.title,
@@ -186,8 +186,8 @@ def update_note(note_id: int, note_update: NoteUpdate):
         if note_update.audio_data is not None:
             try:
                 note.audio_data = base64.b64decode(note_update.audio_data)
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=f"Invalid audio data: {str(e)}")
+            except Exception:
+                raise HTTPException(status_code=400, detail="Invalid audio data")
         if note_update.audio_duration is not None:
             note.audio_duration = note_update.audio_duration
         

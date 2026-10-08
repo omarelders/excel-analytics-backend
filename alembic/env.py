@@ -26,7 +26,18 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # Import all models for autogenerate support
-from database import Base, UploadedFile, Shipment, Note, PaymentFile, PaymentRecord, ContentItem
+from database import (
+    Base,
+    UploadedFile,
+    Shipment,
+    Note,
+    PaymentFile,
+    PaymentRecord,
+    ContentItem,
+    User,
+    UserSession,
+    PushSubscription,
+)
 
 # Set target metadata for autogenerate
 target_metadata = Base.metadata

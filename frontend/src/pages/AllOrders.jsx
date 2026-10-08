@@ -97,7 +97,7 @@ function AllOrdersPage() {
       setStats(prev => ({ ...prev, totalOrders: response.data.total || 0 }))
       
       // For total price, fetch more data with same filters
-      const allParams = { limit: 1000 }
+      const allParams = { limit: 100 }
       if (dateFromVal) allParams.date_from = dateFromVal
       if (dateToVal) allParams.date_to = dateToVal
       

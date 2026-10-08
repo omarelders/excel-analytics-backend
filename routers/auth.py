@@ -4,31 +4,45 @@ Supports multi-device sessions via per-token rows in user_sessions table.
 """
 import os
 import uuid
+import hashlib
 import bcrypt
 from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Response, Request, Form, Depends
 
-from dependencies import get_current_user
+from dependencies import get_current_user, limiter
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
-# Check environment - Default to False (Development) if not set
-IS_PRODUCTION = os.getenv("ENV") == "production"
+# Secure cookies default to True unless explicitly running in development
+def is_secure_cookie() -> bool:
+    return os.getenv("ENV") != "development"
+
+# Module-level alias for backward compatibility
+SECURE_COOKIE = is_secure_cookie()
 
 # Session durations
-REMEMBER_ME_SECONDS = 315_360_000  # 10 years
+REMEMBER_ME_SECONDS = 2_592_000   # 30 days
 DEFAULT_SESSION_SECONDS = 86_400   # 1 day
+
+# Dummy bcrypt hash for timing attack mitigation on non-existent users
+DUMMY_BCRYPT_HASH = "$2b$12$k8Y6iX2t6tQk2tQk2tQk2e7k8Y6iX2t6tQk2tQk2tQk2e7k8Y6iX2"
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a password against its hash using bcrypt"""
-    return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
+    """Verify a password against its hash using bcrypt with 72-byte truncation safety"""
+    try:
+        pw_bytes = plain_password.encode('utf-8')[:72]
+        return bcrypt.checkpw(pw_bytes, hashed_password.encode('utf-8'))
+    except Exception:
+        return False
 
 
 @router.post("/login")
+@limiter.limit("5/minute")
 def login(
+    request: Request,
     response: Response,
     username: str = Form(...),
     password: str = Form(...),
@@ -40,11 +54,14 @@ def login(
     """
     from database import SessionLocal, User, UserSession
 
-    db = SessionLocal()
+    db = None
     try:
+        db = SessionLocal()
         # 1. Find user
         user = db.query(User).filter(User.username == username).first()
         if not user:
+            # Equalize verification latency to prevent username enumeration via timing attacks
+            verify_password(password, DUMMY_BCRYPT_HASH)
             raise HTTPException(status_code=401, detail="Invalid username or password")
 
         # 2. Verify password
@@ -52,14 +69,14 @@ def login(
             raise HTTPException(status_code=401, detail="Invalid username or password")
 
         # 2.5. Cleanup: Remove expired sessions for this user to keep DB clean
-        # This prevents the table from growing efficiently without a background job
         db.query(UserSession).filter(
             UserSession.user_id == user.id,
             UserSession.expires_at < datetime.utcnow()
         ).delete()
 
-        # 3. Generate session token
-        token = str(uuid.uuid4())
+        # 3. Generate session token & hash for database storage
+        raw_token = str(uuid.uuid4())
+        token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
 
         # 4. Calculate expiry
         if remember_me:
@@ -69,9 +86,9 @@ def login(
 
         expires_at = datetime.utcnow() + duration
 
-        # 5. Store session in DB
+        # 5. Store session in DB using hashed token
         session = UserSession(
-            token=token,
+            token=token_hash,
             user_id=user.id,
             created_at=datetime.utcnow(),
             expires_at=expires_at,
@@ -81,16 +98,12 @@ def login(
 
         # 6. Set HttpOnly cookie
         max_age = REMEMBER_ME_SECONDS if remember_me else DEFAULT_SESSION_SECONDS
-        
-        # NOTE: secure=True is required for HTTPS (production), but breaks HTTP (local dev)
-        # We use IS_PRODUCTION to toggle this automatically.
-        print(f"DEBUG: Login successful for {user.username}. Setting cookie: token={token}, secure={IS_PRODUCTION}, max_age={max_age}")
         response.set_cookie(
             key="session_token",
-            value=token,
+            value=raw_token,
             httponly=True,
-            secure=IS_PRODUCTION,
-            samesite="lax",
+            secure=is_secure_cookie(),
+            samesite="strict",
             max_age=max_age,
             path="/",
         )
@@ -103,12 +116,13 @@ def login(
 
     except HTTPException:
         raise
-    except Exception as e:
-        print(f"DEBUG: Login failed with exception: {str(e)}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Login failed: {str(e)}")
+    except Exception:
+        if db:
+            db.rollback()
+        raise HTTPException(status_code=500, detail="Login failed")
     finally:
-        db.close()
+        if db:
+            db.close()
 
 
 @router.post("/logout")
@@ -123,9 +137,12 @@ def logout(request: Request, response: Response):
     if not token:
         raise HTTPException(status_code=401, detail="No session cookie found")
 
-    db = SessionLocal()
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    db = None
     try:
-        session = db.query(UserSession).filter(UserSession.token == token).first()
+        db = SessionLocal()
+        session = db.query(UserSession).filter(UserSession.token == token_hash).first()
         if session:
             db.delete(session)
             db.commit()
@@ -135,16 +152,20 @@ def logout(request: Request, response: Response):
             key="session_token",
             path="/",
             httponly=True,
-            secure=IS_PRODUCTION,
-            samesite="lax",
+            secure=is_secure_cookie(),
+            samesite="strict",
         )
 
         return {"message": "Logged out successfully"}
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Logout failed: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        if db:
+            db.rollback()
+        raise HTTPException(status_code=500, detail="Logout failed")
     finally:
-        db.close()
+        if db:
+            db.close()
 
 
 @router.get("/me")
@@ -155,4 +176,6 @@ def get_me(current_user: dict = Depends(get_current_user)):
     return {
         "id": current_user["id"],
         "username": current_user["username"],
+        "role": current_user.get("role", "user"),
+        "is_admin": current_user.get("is_admin", False),
     }

@@ -11,21 +11,21 @@ router = APIRouter(prefix="/api/content", tags=["content"], dependencies=[Depend
 
 
 class ContentItemCreate(BaseModel):
-    date: str  # YYYY-MM-DD format
-    title: str
-    type: str = "video"  # 'video' or 'photo'
+    date: str = Field(..., max_length=50)  # YYYY-MM-DD format
+    title: str = Field(..., min_length=1, max_length=255)
+    type: str = Field("video", max_length=50)  # 'video' or 'photo'
     platforms: List[str] = Field(default_factory=list)  # List of platform names
-    status: str = "To Shoot"
-    visualIdea: Optional[str] = None
+    status: str = Field("To Shoot", max_length=50)
+    visualIdea: Optional[str] = Field(None, max_length=5000)
 
 
 class ContentItemUpdate(BaseModel):
-    date: Optional[str] = None
-    title: Optional[str] = None
-    type: Optional[str] = None
+    date: Optional[str] = Field(None, max_length=50)
+    title: Optional[str] = Field(None, min_length=1, max_length=255)
+    type: Optional[str] = Field(None, max_length=50)
     platforms: Optional[List[str]] = None
-    status: Optional[str] = None
-    visualIdea: Optional[str] = None
+    status: Optional[str] = Field(None, max_length=50)
+    visualIdea: Optional[str] = Field(None, max_length=5000)
 
 
 @router.get("")

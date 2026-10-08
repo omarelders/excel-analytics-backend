@@ -85,11 +85,28 @@ def save_upload(db: Session, filename: str, data: list, file_path: str = None):
         "notes": "\u0645\u0644\u0627\u062d\u0638\u0627\u062a",
     }
 
-    existing_codes = {
-        str(code[0]).strip()
-        for code in db.query(Shipment.shipment_code).all()
-        if code[0]
-    }
+    # Collect candidate codes from incoming batch to avoid loading entire table into RAM
+    candidate_codes = set()
+    for row in data:
+        row_lookup = _build_row_lookup(row)
+        c = clean_str(_row_get(row_lookup, keys["code"]))
+        if c:
+            c = c.strip()
+            if c:
+                candidate_codes.add(c)
+
+    existing_codes = set()
+    if candidate_codes:
+        codes_list = list(candidate_codes)
+        BATCH_SIZE = 500
+        for i in range(0, len(codes_list), BATCH_SIZE):
+            batch = codes_list[i : i + BATCH_SIZE]
+            rows = db.query(Shipment.shipment_code).filter(
+                Shipment.shipment_code.in_(batch)
+            ).all()
+            for r in rows:
+                if r[0]:
+                    existing_codes.add(str(r[0]).strip())
 
     for row in data:
         row_lookup = _build_row_lookup(row)
