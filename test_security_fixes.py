@@ -4,9 +4,14 @@ Comprehensive verification test suite for Priority 0 and Priority 1 backend secu
 import io
 import os
 import hashlib
+import uuid
+import subprocess
+import sys
+import importlib.util
+from datetime import datetime
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 import bcrypt
@@ -647,6 +652,371 @@ def test_alembic_migrations_chain():
     script = ScriptDirectory.from_config(cfg)
     heads = script.get_heads()
     assert "002_user_roles_and_auth" in heads
+
+
+# ============================================================================
+# Task 1 — admin recovery and deliberate session invalidation
+# ============================================================================
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load_module(name, relative_path):
+    """Load a module from a file path that is not on sys.path (scripts/, alembic/versions/)."""
+    path = os.path.join(REPO_ROOT, relative_path)
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _migration_002():
+    return _load_module(
+        "migration_002_under_test",
+        os.path.join("alembic", "versions", "20261007_002_user_roles_and_auth.py"),
+    )
+
+
+def test_promote_admin_grants_admin_and_passes_require_admin():
+    """A pre-migration user (role='user', is_admin=False) must be recoverable, then pass require_admin"""
+    # 1. Reproduce the audited defect: a user that already existed before migration 002.
+    original_hash = bcrypt.hashpw(b"omarpassword123", bcrypt.gensalt()).decode("utf-8")
+    db = TestSessionLocal()
+    db.add(User(username="omar", password_hash=original_hash, role="user", is_admin=False))
+    db.commit()
+    db.close()
+
+    client = TestClient(app)
+    login_res = client.post("/api/auth/login", data={"username": "omar", "password": "omarpassword123"})
+    assert login_res.status_code == 200
+    cookies = {"session_token": login_res.cookies["session_token"]}
+
+    # The real auth path agrees the user exists but has no admin privileges (the 403s).
+    me_before = client.get("/api/auth/me", cookies=cookies)
+    assert me_before.status_code == 200
+    assert me_before.json() == {"id": 1, "username": "omar", "role": "user", "is_admin": False}
+    assert client.delete("/upload/files/1", cookies=cookies).status_code == 403
+    assert client.delete("/payments/files/1", cookies=cookies).status_code == 403
+    dependencies.limiter.reset()
+    assert client.post("/notifications/send", json={"title": "t", "body": "b"}, cookies=cookies).status_code == 403
+
+    # 2. Recovery: the script's session-scoped function promotes that user.
+    promote_admin = _load_module("promote_admin_under_test", os.path.join("scripts", "promote_admin.py"))
+    db = TestSessionLocal()
+    message = promote_admin.promote_user(db, "omar")
+    db.close()
+    assert "user 'omar' is now admin" in message
+
+    db = TestSessionLocal()
+    promoted = db.query(User).filter(User.username == "omar").first()
+    assert promoted.role == "admin"
+    assert promoted.is_admin is True
+    assert promoted.password_hash == original_hash, "promote_admin must never touch the password"
+    db.close()
+
+    # 3. The SAME session cookie now passes require_admin on the previously blocked endpoints.
+    me_after = client.get("/api/auth/me", cookies=cookies)
+    assert me_after.json() == {"id": 1, "username": "omar", "role": "admin", "is_admin": True}
+    dependencies.limiter.reset()
+    assert client.post("/notifications/send", json={"title": "t", "body": "b"}, cookies=cookies).status_code == 200
+    assert client.delete("/upload/files/99999", cookies=cookies).status_code == 404
+    assert client.delete("/payments/files/99999", cookies=cookies).status_code == 404
+
+
+def test_promote_admin_is_idempotent_and_rejects_unknown_username():
+    """Promoting an existing admin is a no-op success; an unknown username raises with a clear message"""
+    promote_admin = _load_module("promote_admin_under_test", os.path.join("scripts", "promote_admin.py"))
+
+    db = TestSessionLocal()
+    db.add(User(username="mariam", password_hash=bcrypt.hashpw(b"mariampw123", bcrypt.gensalt()).decode("utf-8")))
+    db.commit()
+    db.close()
+
+    db = TestSessionLocal()
+    first = promote_admin.promote_user(db, "mariam")
+    db.close()
+    assert "user 'mariam' is now admin" in first
+
+    db = TestSessionLocal()
+    second = promote_admin.promote_user(db, "mariam")
+    db.close()
+    assert "already admin" in second
+
+    db = TestSessionLocal()
+    mariam = db.query(User).filter(User.username == "mariam").first()
+    assert mariam.role == "admin" and mariam.is_admin is True
+    db.close()
+
+    with pytest.raises(promote_admin.UserNotFoundError) as excinfo:
+        db = TestSessionLocal()
+        try:
+            promote_admin.promote_user(db, "ghost_user")
+        finally:
+            db.close()
+    assert "ghost_user" in str(excinfo.value)
+    assert "promote_admin.py --list" in str(excinfo.value)
+
+
+def test_promote_admin_cli_end_to_end(tmp_path):
+    """The operator-facing CLI: --list shows roles, promoting exits 0, unknown user exits non-zero"""
+    promote_admin = _load_module("promote_admin_under_test", os.path.join("scripts", "promote_admin.py"))
+    script_path = os.path.join(REPO_ROOT, "scripts", "promote_admin.py")
+
+    # Real file-backed SQLite database so the subprocess sees the committed rows.
+    db_url = f"sqlite:///{(tmp_path / 'promote_admin.sqlite3').as_posix()}"
+    engine = create_engine(db_url)
+    Base.metadata.create_all(bind=engine)
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    original_hash = bcrypt.hashpw(b"cli_user_password", bcrypt.gensalt()).decode("utf-8")
+    db.add(User(username="omar", password_hash=original_hash, role="user", is_admin=False))
+    db.commit()
+    db.close()
+
+    env = dict(os.environ, DATABASE_URL=db_url)
+
+    def run(*args):
+        return subprocess.run(
+            [sys.executable, script_path, *args],
+            cwd=str(tmp_path),
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+    # --list reports every user and its role.
+    listed = run("--list")
+    assert listed.returncode == 0, listed.stderr
+    assert "omar" in listed.stdout
+    assert "user" in listed.stdout
+    assert "admin" not in listed.stdout
+
+    # Unknown username -> non-zero exit with a clear message.
+    missing = run("ghost")
+    assert missing.returncode != 0
+    assert "ghost" in missing.stdout + missing.stderr
+
+    # Promote -> exit 0 and the documented success line.
+    promoted = run("omar")
+    assert promoted.returncode == 0, promoted.stderr
+    assert "user 'omar' is now admin" in promoted.stdout
+
+    # Re-running is an idempotent success, still exit 0.
+    again = run("omar")
+    assert again.returncode == 0, again.stderr
+    assert "already admin" in again.stdout
+
+    # The database really changed, and only the privilege columns did.
+    db = Session()
+    omar = db.query(User).filter(User.username == "omar").first()
+    assert omar.role == "admin"
+    assert omar.is_admin is True
+    assert omar.password_hash == original_hash
+    db.close()
+    engine.dispose()
+
+
+def test_promote_admin_list_reports_a_usable_error_when_schema_is_missing(monkeypatch, capsys):
+    """--list must not dump a traceback on an operator whose database has no tables yet"""
+    promote_admin = _load_module("promote_admin_under_test", os.path.join("scripts", "promote_admin.py"))
+
+    class _SchemaMissingSession:
+        def query(self, *args):
+            raise RuntimeError("no such table: users")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(promote_admin, "SessionLocal", _SchemaMissingSession)
+
+    assert promote_admin.main(["--list"]) == 1
+    out = capsys.readouterr().out
+    assert "[ERROR] Could not list users" in out
+    assert "run_migrations.py" in out
+    assert "Traceback" not in out
+
+
+def test_seed_users_prints_recovery_hint_for_existing_user(monkeypatch, capsys):
+    """An existing non-admin user gets an actionable promote_admin hint, never a silent skip"""
+    monkeypatch.setenv("SEED_ADMIN_PASSWORD", "RecoveryHintPw123!")
+    original_hash = bcrypt.hashpw(b"existinguserpw", bcrypt.gensalt()).decode("utf-8")
+    db = TestSessionLocal()
+    db.add(User(username="omar", password_hash=original_hash, role="user", is_admin=False))
+    db.commit()
+    db.close()
+
+    seed_users.seed()
+    out = capsys.readouterr().out
+    assert "[INFO] User 'omar' exists and is role='user'; run 'python scripts/promote_admin.py omar' to grant admin." in out
+
+    db = TestSessionLocal()
+    omar = db.query(User).filter(User.username == "omar").first()
+    assert omar.password_hash == original_hash, "Seeding must still not overwrite the existing user"
+    assert omar.role == "user" and omar.is_admin is False
+    db.close()
+
+
+def test_migration_002_invalidates_legacy_sessions_only_once():
+    """Migration 002 deletes pre-hash session tokens, keeps hashed ones, and is a no-op on re-run"""
+    migration = _migration_002()
+
+    db = TestSessionLocal()
+    user = User(username="omar", password_hash="hash")
+    db.add(user)
+    db.commit()
+    legacy_token = str(uuid.uuid4())                                   # pre-002 stored the raw uuid4
+    hashed_token = hashlib.sha256(uuid.uuid4().bytes).hexdigest()      # post-002 stores the SHA-256 hash
+    db.add(UserSession(token=legacy_token, user_id=user.id, expires_at=datetime.utcnow()))
+    db.add(UserSession(token=hashed_token, user_id=user.id, expires_at=datetime.utcnow()))
+    db.commit()
+    db.close()
+
+    conn = test_engine.connect()
+    try:
+        assert migration.invalidate_legacy_sessions(conn) == 1
+        remaining = [row[0] for row in conn.execute(text("SELECT token FROM user_sessions")).fetchall()]
+        assert remaining == [hashed_token], "Legacy plaintext token must be invalidated; the hashed one kept"
+
+        # Re-running the invalidation must not log anybody out a second time.
+        assert migration.invalidate_legacy_sessions(conn) == 0
+        assert conn.execute(text("SELECT COUNT(*) FROM user_sessions")).scalar() == 1
+    finally:
+        conn.close()
+
+    # Every user of the database is unaffected: sessions are gone, users are not.
+    db = TestSessionLocal()
+    assert db.query(User).count() == 1
+    db.close()
+
+
+class _FakeResult:
+    def __init__(self, value):
+        self._value = value
+
+    def scalar(self):
+        return self._value
+
+
+class _IntrospectableConn:
+    """Stands in for a live connection: answers only the information_schema probes and
+    the row-existence probes the migration issues, so its control flow can be tested
+    without a Postgres server."""
+
+    def __init__(self, tables=(), columns=(), populated=()):
+        self.tables = set(tables)
+        self.columns = set(columns)
+        self.populated = set(populated)
+
+    def execute(self, statement):
+        sql = " ".join(str(statement).split())
+        if "information_schema.tables" in sql:
+            name = sql.split("table_name = '")[1].split("'")[0]
+            return _FakeResult(name in self.tables)
+        if "information_schema.columns" in sql:
+            name = sql.split("table_name = '")[1].split("'")[0]
+            column = sql.split("column_name = '")[1].split("'")[0]
+            return _FakeResult((name, column) in self.columns)
+        if sql.startswith("SELECT EXISTS (SELECT 1 FROM "):
+            name = sql[len("SELECT EXISTS (SELECT 1 FROM "):].split(")")[0]
+            return _FakeResult(name in self.populated)
+        raise AssertionError(f"Unexpected SQL executed against the stub connection: {sql}")
+
+
+class _RecordingOp:
+    """Records the DDL the migration asks alembic to run, mirroring it onto the stub."""
+
+    def __init__(self, conn):
+        self.conn = conn
+        self.calls = []
+
+    def get_bind(self):
+        return self.conn
+
+    def drop_table(self, name):
+        self.calls.append(("drop_table", name))
+        self.conn.tables.discard(name)
+        self.conn.columns = {c for c in self.conn.columns if c[0] != name}
+        self.conn.populated.discard(name)
+
+    def drop_column(self, table, column):
+        self.calls.append(("drop_column", table, column))
+        self.conn.columns.discard((table, column))
+
+
+ALL_002_TABLES = {"users", "user_sessions", "push_subscriptions"}
+
+
+def test_migration_002_downgrade_drops_schema_and_flags_irreversible_part():
+    """downgrade() drops what 002 created and never hides the part that cannot be reversed"""
+    migration = _migration_002()
+
+    # 1. Fresh database: 002 created the tables and added the columns, so both are undone.
+    conn = _IntrospectableConn(
+        tables=ALL_002_TABLES,
+        columns={("users", "role"), ("users", "is_admin")},
+    )
+    op_stub = _RecordingOp(conn)
+    migration.op = op_stub
+    with pytest.raises(NotImplementedError) as excinfo:
+        migration.downgrade()
+    assert "session" in str(excinfo.value).lower()
+    assert "promote_admin.py" in str(excinfo.value)
+    assert op_stub.calls == [
+        ("drop_column", "users", "role"),
+        ("drop_column", "users", "is_admin"),
+        ("drop_table", "user_sessions"),
+        ("drop_table", "push_subscriptions"),
+        ("drop_table", "users"),
+    ]
+
+    # 2. Partially reversed state: the columns are already gone, so only tables are dropped.
+    conn = _IntrospectableConn(tables=ALL_002_TABLES)
+    op_stub = _RecordingOp(conn)
+    migration.op = op_stub
+    with pytest.raises(NotImplementedError):
+        migration.downgrade()
+    assert op_stub.calls == [
+        ("drop_table", "user_sessions"),
+        ("drop_table", "push_subscriptions"),
+        ("drop_table", "users"),
+    ]
+
+    # 3. Nothing to reverse: still no silent `pass`, and no DDL is attempted.
+    conn = _IntrospectableConn()
+    op_stub = _RecordingOp(conn)
+    migration.op = op_stub
+    with pytest.raises(NotImplementedError):
+        migration.downgrade()
+    assert op_stub.calls == []
+
+
+def test_migration_002_downgrade_never_drops_a_populated_users_table():
+    """A users/user_sessions table that predates 002 must survive the downgrade.
+
+    upgrade() creates those tables only when they are absent, so on a database where
+    the app had already created them (Base.metadata.create_all) they hold the operator's
+    accounts. Dropping them on downgrade would destroy the very users the recovery
+    script exists to restore.
+    """
+    migration = _migration_002()
+
+    conn = _IntrospectableConn(
+        tables=ALL_002_TABLES,
+        columns={("users", "role"), ("users", "is_admin")},
+        populated={"users", "user_sessions"},       # pre-existing accounts and live sessions
+    )
+    op_stub = _RecordingOp(conn)
+    migration.op = op_stub
+    with pytest.raises(NotImplementedError):
+        migration.downgrade()
+
+    # The reversible part still happened; the populated tables were kept.
+    assert op_stub.calls == [
+        ("drop_column", "users", "role"),
+        ("drop_column", "users", "is_admin"),
+        ("drop_table", "push_subscriptions"),        # empty -> provably created by 002
+    ]
+    assert conn.tables == {"users", "user_sessions"}
+
 
 
 

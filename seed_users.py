@@ -47,7 +47,13 @@ def seed():
 
             existing = db.query(User).filter(User.username == username).first()
             if existing:
-                print(f"[INFO] User '{username}' already exists - skipping overwrite.")
+                # Migration 002 gave every pre-existing user role='user' / is_admin=false,
+                # and seeding never overwrites an existing row. Never leave the operator
+                # with a silent skip: tell them exactly how to get admin back.
+                if getattr(existing, "is_admin", False) or getattr(existing, "role", "user") == "admin":
+                    print(f"[INFO] User '{username}' exists and already has admin privileges (role='{existing.role}') - skipping overwrite.")
+                else:
+                    print(f"[INFO] User '{username}' exists and is role='{existing.role}'; run 'python scripts/promote_admin.py {username}' to grant admin.")
                 continue
 
             print(f"[SUCCESS] Creating new user '{username}'...")

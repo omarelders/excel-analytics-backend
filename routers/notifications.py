@@ -5,7 +5,7 @@ from typing import List, Optional
 import json
 import base64
 
-from database import SessionLocal, PushSubscription
+from database import PushSubscription
 from push_config import get_vapid_keys, send_push_notification
 from dependencies import get_current_user, require_admin, limiter
 
@@ -18,6 +18,8 @@ router = APIRouter(
 
 # Dependency
 def get_db():
+    from database import SessionLocal
+
     db = SessionLocal()
     try:
         yield db
@@ -36,6 +38,8 @@ class NotificationSchema(BaseModel):
 
 def _broadcast_push_worker(message: str):
     """Background task to broadcast push notifications without blocking HTTP worker"""
+    from database import SessionLocal
+
     db = SessionLocal()
     try:
         subs = db.query(PushSubscription).all()
