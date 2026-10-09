@@ -25,7 +25,8 @@ from slowapi import Limiter
 TRUSTED_PROXY_COUNT_ENV = "TRUSTED_PROXY_COUNT"
 DEFAULT_TRUSTED_PROXY_COUNT = 1
 
-# Bucket key for a request that reached us with no peer address at all.
+# Bucket key for a request whose client cannot be attributed: no peer address at
+# all, or a forwarded header that the trusted chain cannot account for.
 UNKNOWN_CLIENT_KEY = "unknown"
 
 
@@ -89,9 +90,17 @@ def get_client_key(request: Request) -> str:
     control, so it is ignored and rotating it cannot open a fresh bucket.
 
     With no trusted hop (TRUSTED_PROXY_COUNT=0) the header is outside our trust
-    boundary entirely and the transport peer address is used instead. The same
-    fallback applies when the header is shorter than the proxy chain we were told
-    to trust, because then no entry can be attributed to a trusted hop.
+    boundary entirely and the transport peer address is used instead. That is
+    safe only because both launchers restrict uvicorn's forwarded-header trust to
+    loopback (see ProxyHeadersMiddleware's "client_host in self.trusted_hosts"
+    gate), so scope["client"] is never rewritten from a client-supplied header
+    for a request that really came through a router - it stays the peer.
+
+    A header shorter than the proxy chain we were told to trust leaves nothing in
+    it attributable to a hop, which is a misconfiguration rather than a client,
+    so every such request shares one bucket the client cannot rotate. Falling
+    back to request.client there would be a second policy decision: under a
+    blanket forwarded-allow-ips the peer could itself have come from the header.
     """
     peer = request.client.host if request.client else None
 
@@ -106,7 +115,7 @@ def get_client_key(request: Request) -> str:
     ]
     index = len(entries) - trusted
     if index < 0:
-        return peer or UNKNOWN_CLIENT_KEY
+        return UNKNOWN_CLIENT_KEY
     return entries[index]
 
 

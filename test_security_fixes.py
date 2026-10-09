@@ -3,6 +3,7 @@ Comprehensive verification test suite for Priority 0 and Priority 1 backend secu
 """
 import io
 import os
+import re
 import asyncio
 import hashlib
 import subprocess
@@ -1156,6 +1157,11 @@ def test_migration_002_downgrade_leaves_a_database_without_users_alone(tmp_path)
 # was throttled as one shared bucket. The tests below drive a real Request with an
 # explicit peer and header, and the HTTP-level ones drive TestClient from one
 # fixed peer that stands in for the router.
+#
+# The layer below the key function matters too: uvicorn's ProxyHeadersMiddleware
+# runs before the app and can overwrite scope["client"] from X-Forwarded-For, so
+# _through_proxy_headers() exists to run requests through the real middleware
+# configured with whatever the launchers ship.
 
 def _make_request(peer, forwarded_for=None):
     """A real starlette Request with an explicit peer and X-Forwarded-For."""
@@ -1173,6 +1179,55 @@ def _make_request(peer, forwarded_for=None):
     )
 
 
+# What uvicorn's --forwarded-allow-ips / gunicorn's forwarded_allow_ips setting
+# must be set to by the shipped launchers, and why. '*' is the dangerous value:
+# ProxyHeadersMiddleware then trusts every peer and copies the header's
+# left-most entry - which the client writes - into scope["client"].
+SHIPPED_FORWARDED_ALLOW_IPS = "127.0.0.1,::1"
+
+
+def _launcher_forwarded_allow_ips():
+    """The --forwarded-allow-ips value the shipped launchers actually pass."""
+    shipped = set()
+    for filename in ("Procfile", "Dockerfile"):
+        with open(filename, "r", encoding="utf-8") as f:
+            content = f.read()
+        found = re.findall(r"--forwarded-allow-ips=([^\s\"']+)", content)
+        assert len(found) == 1, f"{filename} must pass exactly one forwarded-header trust policy"
+        shipped.add(found[0])
+    assert len(shipped) == 1, f"both launchers must pass the same policy, got {shipped}"
+    return shipped.pop()
+
+
+def _through_proxy_headers(peer, forwarded_for, trusted_hosts):
+    """Run a request through uvicorn's real ProxyHeadersMiddleware, as the
+    launcher's --forwarded-allow-ips/--proxy-headers flags configure it, and
+    return the resulting Request.
+
+    This is the layer below the key function: whatever it writes into
+    scope["client"] is the "peer" that get_client_key falls back to.
+    """
+    from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+    async def noop_app(scope, receive, send):
+        return None
+
+    headers = []
+    if forwarded_for is not None:
+        headers.append((b"x-forwarded-for", forwarded_for.encode("latin-1")))
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": "POST",
+        "path": "/api/auth/login",
+        "raw_path": b"/api/auth/login",
+        "headers": headers,
+        "client": peer,
+    }
+    asyncio.run(ProxyHeadersMiddleware(noop_app, trusted_hosts=trusted_hosts)(scope, None, None))
+    return Request(scope)
+
+
 @pytest.mark.parametrize(
     "peer,forwarded_for,trusted_count,expected",
     [
@@ -1182,15 +1237,19 @@ def _make_request(peer, forwarded_for=None):
         (("10.0.0.9", 5000), "1.1.1.1, 203.0.113.9", 0, "10.0.0.9"),
         (("10.0.0.9", 5000), None, 0, "10.0.0.9"),
         # One trusted proxy: the address that hop observed wins over anything the
-        # client wrote to its left, and a header-free request falls back to the peer.
+        # client wrote to its left. A request with no forwarded header at all does
+        # not match the declared topology (a proxy was supposed to append one), so
+        # it fails closed onto the non-rotatable bucket instead.
         (("10.0.0.9", 5000), "203.0.113.9", 1, "203.0.113.9"),
         (("10.0.0.9", 5000), "spoofed.example, 203.0.113.9", 1, "203.0.113.9"),
-        (("10.0.0.9", 5000), None, 1, "10.0.0.9"),
+        (("10.0.0.9", 5000), None, 1, dependencies.UNKNOWN_CLIENT_KEY),
         # Two trusted hops: step one address further left than that.
         (("10.0.0.9", 5000), "spoofed.example, 203.0.113.9, 10.0.0.8", 2, "203.0.113.9"),
         # More trusted hops than the header has entries: nothing in the header can be
-        # attributed to a trusted hop, so the peer is used rather than a guess.
-        (("10.0.0.9", 5000), "203.0.113.9", 3, "10.0.0.9"),
+        # attributed to a trusted hop, so this fails closed onto the one bucket the
+        # client cannot rotate rather than onto an address that may have come from a
+        # header.
+        (("10.0.0.9", 5000), "203.0.113.9", 3, dependencies.UNKNOWN_CLIENT_KEY),
     ],
 )
 def test_rate_limit_key_function(monkeypatch, peer, forwarded_for, trusted_count, expected):
@@ -1331,10 +1390,13 @@ def test_login_rate_limit_ignores_spoofed_header_from_untrusted_peer(monkeypatch
 
 
 def test_launchers_trust_the_platform_proxy_headers():
-    """Both launchers must let the server layer resolve the real client.
+    """Both launchers must pin uvicorn's forwarded-header trust to loopback.
 
-    Without these flags uvicorn leaves scope['client'] as the proxy's address no
-    matter what the key function does with X-Forwarded-For.
+    A '*' here is what let a client-supplied header write scope["client"], and
+    with it every TRUSTED_PROXY_COUNT that cannot attribute a client from the
+    header falls back to a key the caller rotates. Loopback-only keeps
+    scope["client"] the real transport peer for a routed request; the app
+    resolves the client itself from the header (dependencies.get_client_key).
     """
     with open("Procfile", "r", encoding="utf-8") as f:
         procfile = f.read()
@@ -1342,48 +1404,74 @@ def test_launchers_trust_the_platform_proxy_headers():
         dockerfile = f.read()
 
     assert "--proxy-headers" in procfile, "uvicorn must be told to honour X-Forwarded-For"
-    assert "--forwarded-allow-ips='*'" in procfile
-    assert "--forwarded-allow-ips='*'" in dockerfile, (
-        "gunicorn's forwarded_allow_ips setting is what UvicornWorker hands to uvicorn"
-    )
+    for content, name in ((procfile, "Procfile"), (dockerfile, "Dockerfile")):
+        assert "--forwarded-allow-ips=" + SHIPPED_FORWARDED_ALLOW_IPS in content, (
+            f"{name} must restrict forwarded-header trust to loopback"
+        )
+        assert "--forwarded-allow-ips=*" not in content, (
+            f"{name} must not trust an arbitrary peer with the client's identity"
+        )
 
 
 def test_uvicorn_proxy_headers_middleware_resolves_the_client():
-    """The flags the launchers were given are the ones uvicorn actually reads.
+    """The shipped forwarded-header policy keeps scope['client'] the transport peer.
 
-    Drives uvicorn's real ProxyHeadersMiddleware with the transport peer of a
-    platform router. trusted_hosts="*" is what --forwarded-allow-ips='*' installs,
-    and it is what makes scope['client'] the forwarded client instead of the
-    router; the default loopback-only list leaves the old bug in place.
+    Drives uvicorn's real ProxyHeadersMiddleware. With the policy the launchers
+    ship, a request that came through the router is NOT rewritten from its
+    header; only a proxy on the same host (loopback) still is, which is the
+    legitimate local case. '*' - the value this task replaced - rewrites from the
+    header for any peer, and that is the hole the app no longer leans on.
     """
-    from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+    router = ("10.0.0.7", 50000)
 
-    async def resolve(trusted_hosts):
-        seen = {}
+    shipped = _through_proxy_headers(router, "203.0.113.9", SHIPPED_FORWARDED_ALLOW_IPS)
+    assert shipped.client == router, "a routed request must keep the transport peer"
+    assert shipped.client.host != "203.0.113.9"
 
-        async def app(scope, receive, send):
-            seen["client"] = scope.get("client")
+    # The one peer the shipped policy still trusts: a proxy on the same host.
+    local = _through_proxy_headers(("127.0.0.1", 50000), "203.0.113.9", SHIPPED_FORWARDED_ALLOW_IPS)
+    assert local.client.host == "203.0.113.9", "loopback peers stay trusted"
 
-        middleware = ProxyHeadersMiddleware(app, trusted_hosts=trusted_hosts)
-        await middleware(
-            {
-                "type": "http",
-                "http_version": "1.1",
-                "method": "POST",
-                "path": "/api/auth/login",
-                "raw_path": b"/api/auth/login",
-                "headers": [(b"x-forwarded-for", b"203.0.113.9")],
-                "client": ("10.0.0.7", 50000),
-            },
-            None,
-            None,
-        )
-        return seen["client"]
+    # The value this task replaced, asserted only to document what it did.
+    blanket = _through_proxy_headers(router, "203.0.113.9", "*")
+    assert blanket.client.host == "203.0.113.9", "'*' copies the header's left-most entry"
 
-    assert asyncio.run(resolve("*")) == ("203.0.113.9", 0)
-    # The form gunicorn's --forwarded-allow-ips validator hands to UvicornWorker.
-    assert asyncio.run(resolve(["*"])) == ("203.0.113.9", 0)
-    assert asyncio.run(resolve("127.0.0.1,::1")) == ("10.0.0.7", 50000)
+
+def test_spoofed_forwarded_for_cannot_rotate_the_bucket_under_the_launcher_policy(monkeypatch):
+    """A header the client controls cannot mint a new rate-limit bucket.
+
+    Runs the whole stack for a request that really came through the router: the
+    real ProxyHeadersMiddleware configured with whatever the launchers ship, into
+    the real get_client_key. Whatever a request cannot attribute from the header,
+    it must key the same way every time.
+
+    This fails if the launchers ship a blanket forwarded-allow-ips: uvicorn then
+    copies the header's left-most entry into scope["client"], get_client_key
+    reads it as the peer, and both fallbacks become a key the caller rotates.
+    """
+    trusted_hosts = _launcher_forwarded_allow_ips()
+    router = ("198.51.100.99", 50000)   # the platform router, never loopback
+    spoofed = ("9.9.9.1", "9.9.9.2", "9.9.9.3")
+
+    # trusted=0: no hop to believe. trusted=2 against a header no proxy
+    # appending can produce: nothing in the header is attributable either.
+    for trusted_count, why in ((0, "no trusted hop"), (2, "more hops than the header can show")):
+        monkeypatch.setenv("TRUSTED_PROXY_COUNT", str(trusted_count))
+        keys = set()
+        for header in spoofed:
+            request = _through_proxy_headers(router, header, trusted_hosts)
+            keys.add(dependencies.get_client_key(request))
+        assert len(keys) == 1, f"{why}: the bucket rotated across spoofed headers ({keys})"
+        assert keys.isdisjoint(spoofed), f"{why}: a header value became the bucket key"
+
+    # The same request through the shipped policy is keyed on the router's
+    # address - too broad, but not something the caller can steer.
+    monkeypatch.setenv("TRUSTED_PROXY_COUNT", "0")
+    keys = {
+        dependencies.get_client_key(_through_proxy_headers(router, header, trusted_hosts))
+        for header in spoofed
+    }
+    assert keys == {"198.51.100.99"}
 
 
 
