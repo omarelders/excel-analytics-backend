@@ -3,11 +3,13 @@ Comprehensive verification test suite for Priority 0 and Priority 1 backend secu
 """
 import io
 import os
+import asyncio
 import hashlib
 import subprocess
 import sys
 import importlib.util
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text, event, inspect
 from sqlalchemy.orm import sessionmaker
@@ -1142,6 +1144,246 @@ def test_migration_002_downgrade_leaves_a_database_without_users_alone(tmp_path)
         assert _table_names(engine) == []
     finally:
         engine.dispose()
+
+
+# ============================================================================
+# Task 2 — the rate limiter must key on the real client, not the proxy
+# ============================================================================
+# The suite below used to call /api/auth/login through TestClient, whose peer
+# address is always "testclient" - a single address for every test in the file.
+# That is what hid this bug: the limiter was keyed on get_remote_address, which
+# on the deployed platform resolves to the platform router, so every user's login
+# was throttled as one shared bucket. The tests below drive a real Request with an
+# explicit peer and header, and the HTTP-level ones drive TestClient from one
+# fixed peer that stands in for the router.
+
+def _make_request(peer, forwarded_for=None):
+    """A real starlette Request with an explicit peer and X-Forwarded-For."""
+    headers = []
+    if forwarded_for is not None:
+        headers.append((b"x-forwarded-for", forwarded_for.encode("latin-1")))
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/auth/login",
+            "headers": headers,
+            "client": peer,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "peer,forwarded_for,trusted_count,expected",
+    [
+        # No trusted proxy in front: X-Forwarded-For is attacker-controlled, so the
+        # transport peer wins even when the header claims to be somebody else.
+        (("10.0.0.9", 5000), "203.0.113.9", 0, "10.0.0.9"),
+        (("10.0.0.9", 5000), "1.1.1.1, 203.0.113.9", 0, "10.0.0.9"),
+        (("10.0.0.9", 5000), None, 0, "10.0.0.9"),
+        # One trusted proxy: the address that hop observed wins over anything the
+        # client wrote to its left, and a header-free request falls back to the peer.
+        (("10.0.0.9", 5000), "203.0.113.9", 1, "203.0.113.9"),
+        (("10.0.0.9", 5000), "spoofed.example, 203.0.113.9", 1, "203.0.113.9"),
+        (("10.0.0.9", 5000), None, 1, "10.0.0.9"),
+        # Two trusted hops: step one address further left than that.
+        (("10.0.0.9", 5000), "spoofed.example, 203.0.113.9, 10.0.0.8", 2, "203.0.113.9"),
+        # More trusted hops than the header has entries: nothing in the header can be
+        # attributed to a trusted hop, so the peer is used rather than a guess.
+        (("10.0.0.9", 5000), "203.0.113.9", 3, "10.0.0.9"),
+    ],
+)
+def test_rate_limit_key_function(monkeypatch, peer, forwarded_for, trusted_count, expected):
+    """The bucket key is the client the trusted proxy chain observed."""
+    monkeypatch.setenv("TRUSTED_PROXY_COUNT", str(trusted_count))
+    assert dependencies.get_client_key(_make_request(peer, forwarded_for)) == expected
+
+
+def test_limiter_is_wired_to_the_client_key_function():
+    """The limiter must key on get_client_key, not on the transport peer.
+
+    The unit table above can only show the function is right; this shows the limiter
+    actually calls it. Reverting the wiring to slowapi's get_remote_address leaves
+    that table green, so the wiring needs a guard of its own.
+    """
+    assert dependencies.limiter._key_func is dependencies.get_client_key
+
+
+def test_trusted_proxy_count_fails_fast_in_production(monkeypatch):
+    """ENV=production with the hop count undeclared must refuse to boot.
+
+    This is the deploy that would otherwise silently throttle every user as one
+    bucket. An explicit "0" is a declaration rather than an omission, so it is
+    accepted, and only means "no proxy in front".
+    """
+    monkeypatch.setenv("ENV", "production")
+    monkeypatch.delenv("TRUSTED_PROXY_COUNT", raising=False)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        dependencies.configure_proxy_trust()
+    assert "TRUSTED_PROXY_COUNT" in str(excinfo.value)
+
+    monkeypatch.setenv("TRUSTED_PROXY_COUNT", "0")
+    assert dependencies.configure_proxy_trust() == 0
+    monkeypatch.setenv("TRUSTED_PROXY_COUNT", "1")
+    assert dependencies.configure_proxy_trust() == 1
+
+    monkeypatch.delenv("ENV", raising=False)
+    monkeypatch.delenv("TRUSTED_PROXY_COUNT", raising=False)
+    assert dependencies.configure_proxy_trust() == dependencies.DEFAULT_TRUSTED_PROXY_COUNT
+
+
+def test_trusted_proxy_count_rejects_values_that_are_not_a_hop_count(monkeypatch):
+    """A garbage count is a startup error, not a silent fallback to the default."""
+    for raw in ("not-a-number", "-2", "1.5", ""):
+        monkeypatch.setenv("TRUSTED_PROXY_COUNT", raw)
+        with pytest.raises(RuntimeError):
+            dependencies.configure_proxy_trust()
+
+
+def test_app_startup_refuses_to_boot_without_a_declared_proxy_count():
+    """The guard is wired into startup, not only into a helper.
+
+    Booting the real app in a subprocess with ENV=production and no
+    TRUSTED_PROXY_COUNT must abort, naming the variable.
+    """
+    env = dict(os.environ, ENV="production", DATABASE_URL="sqlite:///:memory:")
+    env.pop("TRUSTED_PROXY_COUNT", None)
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import main"],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0, "boot must fail, not start with a shared rate-limit bucket"
+    assert "TRUSTED_PROXY_COUNT" in result.stderr
+    assert "RuntimeError" in result.stderr
+
+
+def test_login_rate_limit_buckets_clients_behind_one_proxy(monkeypatch):
+    """Two clients behind the same proxy get independent login buckets.
+
+    The requests arrive from one fixed peer address that stands in for the
+    platform router, and the per-client identity arrives as X-Forwarded-For -
+    which is how it arrives on the platform, and what the old peer-keyed limiter
+    threw away.
+    """
+    monkeypatch.setenv("TRUSTED_PROXY_COUNT", "1")
+    dependencies.limiter.reset()
+    try:
+        router = TestClient(app, client=("10.0.0.7", 50000))
+
+        for _ in range(5):
+            res = router.post(
+                "/api/auth/login",
+                data={"username": "nonexistent", "password": "any"},
+                headers={"X-Forwarded-For": "203.0.113.9"},
+            )
+            assert res.status_code == 401
+
+        blocked = router.post(
+            "/api/auth/login",
+            data={"username": "nonexistent", "password": "any"},
+            headers={"X-Forwarded-For": "203.0.113.9"},
+        )
+        assert blocked.status_code == 429, "the 6th login from the same client must be throttled"
+
+        # A different client arriving through the very same proxy is unaffected.
+        other = router.post(
+            "/api/auth/login",
+            data={"username": "nonexistent", "password": "any"},
+            headers={"X-Forwarded-For": "198.51.100.4"},
+        )
+        assert other.status_code == 401, "exhausting one client's limit must not throttle another"
+    finally:
+        dependencies.limiter.reset()
+
+
+def test_login_rate_limit_ignores_spoofed_header_from_untrusted_peer(monkeypatch):
+    """With nothing trusted in front, rotating the header opens no new bucket.
+
+    Five attempts from one peer, each claiming a different X-Forwarded-For client,
+    must exhaust that peer's single bucket.
+    """
+    monkeypatch.setenv("TRUSTED_PROXY_COUNT", "0")
+    dependencies.limiter.reset()
+    try:
+        router = TestClient(app, client=("10.0.0.7", 50000))
+
+        for index in range(5):
+            res = router.post(
+                "/api/auth/login",
+                data={"username": "nonexistent", "password": "any"},
+                headers={"X-Forwarded-For": f"9.9.9.{index}"},
+            )
+            assert res.status_code == 401
+
+        res = router.post(
+            "/api/auth/login",
+            data={"username": "nonexistent", "password": "any"},
+            headers={"X-Forwarded-For": "9.9.9.99"},
+        )
+        assert res.status_code == 429, "a spoofed X-Forwarded-For from an untrusted peer must not open a fresh bucket"
+    finally:
+        dependencies.limiter.reset()
+
+
+def test_launchers_trust_the_platform_proxy_headers():
+    """Both launchers must let the server layer resolve the real client.
+
+    Without these flags uvicorn leaves scope['client'] as the proxy's address no
+    matter what the key function does with X-Forwarded-For.
+    """
+    with open("Procfile", "r", encoding="utf-8") as f:
+        procfile = f.read()
+    with open("Dockerfile", "r", encoding="utf-8") as f:
+        dockerfile = f.read()
+
+    assert "--proxy-headers" in procfile, "uvicorn must be told to honour X-Forwarded-For"
+    assert "--forwarded-allow-ips='*'" in procfile
+    assert "--forwarded-allow-ips='*'" in dockerfile, (
+        "gunicorn's forwarded_allow_ips setting is what UvicornWorker hands to uvicorn"
+    )
+
+
+def test_uvicorn_proxy_headers_middleware_resolves_the_client():
+    """The flags the launchers were given are the ones uvicorn actually reads.
+
+    Drives uvicorn's real ProxyHeadersMiddleware with the transport peer of a
+    platform router. trusted_hosts="*" is what --forwarded-allow-ips='*' installs,
+    and it is what makes scope['client'] the forwarded client instead of the
+    router; the default loopback-only list leaves the old bug in place.
+    """
+    from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+    async def resolve(trusted_hosts):
+        seen = {}
+
+        async def app(scope, receive, send):
+            seen["client"] = scope.get("client")
+
+        middleware = ProxyHeadersMiddleware(app, trusted_hosts=trusted_hosts)
+        await middleware(
+            {
+                "type": "http",
+                "http_version": "1.1",
+                "method": "POST",
+                "path": "/api/auth/login",
+                "raw_path": b"/api/auth/login",
+                "headers": [(b"x-forwarded-for", b"203.0.113.9")],
+                "client": ("10.0.0.7", 50000),
+            },
+            None,
+            None,
+        )
+        return seen["client"]
+
+    assert asyncio.run(resolve("*")) == ("203.0.113.9", 0)
+    # The form gunicorn's --forwarded-allow-ips validator hands to UvicornWorker.
+    assert asyncio.run(resolve(["*"])) == ("203.0.113.9", 0)
+    assert asyncio.run(resolve("127.0.0.1,::1")) == ("10.0.0.7", 50000)
 
 
 

@@ -22,6 +22,13 @@ application. Collection order is alphabetical, so test_flow.py always won.
 Values are assigned rather than setdefault'd so the suite is deterministic and can
 never reach a developer's real database: tests must always run against SQLite.
 
+TRUSTED_PROXY_COUNT is set here for the same reason: main.py refuses to import
+under ENV=production when the trusted-proxy topology is undeclared (see
+dependencies.configure_proxy_trust), and it is read once, at import time. Without
+this line every module that imports `main` would fail to collect. The value is the
+production reality - one reverse proxy in front - and tests that need a different
+topology set it with monkeypatch.setenv.
+
 These are the same values test_security_fixes.py already sets for itself, so this
 changes nothing for the file run on its own - it only makes that guarantee hold when
 the whole suite is collected.
@@ -30,3 +37,4 @@ import os
 
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 os.environ["ENV"] = "production"
+os.environ["TRUSTED_PROXY_COUNT"] = "1"

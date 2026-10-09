@@ -15,7 +15,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
 from constants import CHANGEABLE_STATUSES, TARGET_STATUSES, ALL_STATUSES, STATUS_COLORS
-from dependencies import limiter
+from dependencies import limiter, configure_proxy_trust
 
 # Import routers
 from routers import shipments, payments, notes, content, notifications, auth
@@ -47,6 +47,17 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS Configuration: localhost origins only when ENV != 'production'
 is_production = os.getenv("ENV") == "production"
+
+# How many reverse proxies sit in front of the app (Heroku: 1). Read here, at
+# import time, for the same reason as is_production above: the rate limiter's key
+# function is keyed on it, so a production deploy that has not declared its proxy
+# chain has to fail loudly here instead of silently keying every request on the
+# router's address and throttling the whole user base as one bucket.
+trusted_proxy_count = configure_proxy_trust()
+logger.info(
+    "Rate limiter keyed on the client IP behind %d trusted proxy hop(s)",
+    trusted_proxy_count,
+)
 
 if not is_production:
     cors_origins = [
