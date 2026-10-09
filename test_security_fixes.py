@@ -498,9 +498,11 @@ def test_rbac_admin_guards():
     res_send_denied = client.post("/notifications/send", json={"title": "Test", "body": "Body"})
     assert res_send_denied.status_code == 403, "Non-admin user must receive 403 on /notifications/send"
 
-    # Also test /api/notifications/send alias
-    res_api_send_denied = client.post("/api/notifications/send", json={"title": "Test", "body": "Body"})
-    assert res_api_send_denied.status_code == 403, "Non-admin user must receive 403 on /api/notifications/send"
+    # The bare path is the only notification path: /api/notifications/send is
+    # not served (a second path would be a second rate-limit bucket).
+    dependencies.limiter.reset()
+    res_api_send_missing = client.post("/api/notifications/send", json={"title": "Test", "body": "Body"})
+    assert res_api_send_missing.status_code == 404, "/api/notifications/send must not be served"
 
     # 2. Non-admin user calling DELETE /upload/files/1 -> 403 Forbidden
     res_del_shipment_denied = client.delete("/upload/files/1")
@@ -517,6 +519,18 @@ def test_rbac_admin_guards():
 
     res_del_payment_admin = client.delete("/payments/files/99999")
     assert res_del_payment_admin.status_code == 404, "Admin should pass authorization check (returning 404 for missing file)"
+
+    # And the admin passes the broadcast guard on the real path: 200, not
+    # 403/401. Subscriptions are cleared first so the background fan-out has
+    # nothing to push - it then depends on no rows left by other tests.
+    from database import PushSubscription
+    db = TestSessionLocal()
+    db.query(PushSubscription).delete()
+    db.commit()
+    db.close()
+    dependencies.limiter.reset()
+    res_send_admin = client.post("/notifications/send", json={"title": "Test", "body": "Body"})
+    assert res_send_admin.status_code == 200, "Admin must be authorized on /notifications/send"
 
     app.dependency_overrides.clear()
 
@@ -1559,12 +1573,12 @@ def test_spoofed_forwarded_for_cannot_rotate_the_bucket_under_the_launcher_polic
 #     broadcast endpoint had two independent 1/minute buckets: two broadcasts a
 #     minute instead of one.
 #
-# The fix splits the header policy by path, and serves the second prefix with
-# an alias route that forwards to the single router registration.
+# The fix splits the header policy: no-store for every response outside the
+# docs surface, a strict CSP for every response that is not a docs page, and
+# one registration of the router instead of two.
 # test_swagger_docs_csp_compatibility already existed above (it predates this
-# task); it is updated in place there - kept at its original location rather
-# than shadowed by a second definition lower down - so the docs policy is
-# asserted where the docs-surface test has always lived.
+# task); it is updated in place there, kept at its original location, so the
+# docs policy is asserted where the docs-surface test has always lived.
 
 
 def _an_api_response(client):
@@ -1575,13 +1589,17 @@ def _an_api_response(client):
     )
 
 
-def test_cache_control_no_store_is_scoped_to_the_api_surface():
-    """no-store belongs to the API surface, not to every response.
+def test_cache_control_covers_the_whole_api_surface():
+    """no-store belongs to every API response, not just the /api/ ones.
 
-    Set on everything it made the docs page and the assets it loads
-    uncacheable; dropped entirely it would let a browser keep a session-bearing
-    API response. It has to be exactly one of the two surfaces, and the paths
-    that are not API must not carry any header that forbids reuse either.
+    Set on every response it made the docs page and the assets it loads
+    uncacheable, so the docs surface is now the exception. But the exception
+    is the docs surface, not the /api/ prefix: /shipments, /statuses,
+    /notifications/* and the rest of the bare endpoints read the session
+    exactly like the /api/* ones do, and they carried no-store before it was
+    scoped. Scoping to /api/ would silently drop the header from all of them,
+    so the assertion is on the whole API surface - both prefixes - with only
+    the docs pages and the schema they fetch left cacheable.
     """
     client = TestClient(app)
 
@@ -1589,11 +1607,27 @@ def test_cache_control_no_store_is_scoped_to_the_api_surface():
     assert api_res.status_code == 401
     assert api_res.headers.get("cache-control") == "no-store"
 
-    for path in ("/health", "/docs", "/openapi.json"):
+    # The bare JSON endpoints are part of the same session-bearing surface.
+    bare = (
+        "/health",
+        "/statuses",
+        "/shipments",
+        "/notifications/vapid-key",   # 401 unauthenticated, still no-store
+    )
+    for path in bare:
         res = client.get(path)
-        assert res.status_code == 200
+        assert res.status_code in (200, 401), (path, res.status_code)
+        assert res.headers.get("cache-control") == "no-store", (
+            f"{path} is a session-bearing API response and must carry no-store"
+        )
+
+    # The docs surface is what stays cacheable: the HTML pages, the schema
+    # they fetch at runtime, and the OAuth2 redirect page Swagger opens.
+    for path in ("/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"):
+        res = client.get(path)
+        assert res.status_code == 200, path
         assert "cache-control" not in res.headers, (
-            f"{path} is not part of the API surface and must stay cacheable"
+            f"{path} is part of the docs surface and must stay cacheable"
         )
 
 
@@ -1648,12 +1682,13 @@ def _notifications_router_registrations():
 
 
 def test_the_notifications_router_is_registered_exactly_once():
-    """Two registrations are two paths, and two paths are two buckets.
+    """One registration: a second would be a second path, and a second bucket.
 
     slowapi keys a decorated limit on the request path, so including the router
-    twice gave the 1/minute broadcast endpoint two independent budgets. The
-    /api prefix is still served, but by an alias that forwards to this one
-    registration.
+    twice (bare and under /api) gives the 1/minute broadcast endpoint two
+    independent budgets. Serving both prefixes with a redirect alias was tried
+    and is gone: it broke clients that send the session cookie per request,
+    and nothing in the frontend calls the /api prefix.
     """
     registrations = _notifications_router_registrations()
     assert len(registrations) == 1, (
@@ -1666,12 +1701,13 @@ def test_the_notifications_router_is_registered_exactly_once():
 
 
 def test_the_notification_path_set_is_the_intended_one():
-    """Both prefixes answer, and the schema lists each endpoint once.
+    """Exactly one prefix serves notifications: the bare one.
 
-    The alias that serves /api/notifications/* is not in the OpenAPI schema,
-    so the schema is the exact set of endpoints the router really defines - and
-    a second include_router() would have left an /api/notifications/* duplicate
-    of all four behind.
+    The schema is the exact set of endpoints the router really defines, and a
+    second include_router() would have left an /api/notifications/* duplicate
+    of all four behind. The /api prefix must not be served at all - a second
+    path would be a second rate-limit bucket, and a redirect alias would break
+    cookie-per-request clients, so 404 is the correct answer for it.
     """
     paths = sorted(path for path in app.openapi()["paths"] if "notifications" in path)
     assert paths == [
@@ -1681,16 +1717,40 @@ def test_the_notification_path_set_is_the_intended_one():
         "/notifications/vapid-key",
     ]
 
+    client = TestClient(app)
+    dependencies.limiter.reset()
+    # Probe the real server, not the cached schema: any echo of the dead
+    # prefix (a redirect alias, a second registration) answers 3xx/401/405
+    # here instead of 404.
+    assert client.get("/api/notifications/vapid-key").status_code == 404, (
+        "/api/notifications/vapid-key must not be served"
+    )
+    assert client.post("/api/notifications/send", json={"title": "t", "body": "b"}).status_code == 404, (
+        "/api/notifications/send must not be served"
+    )
 
-def test_both_notification_prefixes_share_one_rate_limit_bucket():
-    """One broadcast a minute in total, not one per prefix.
 
-    Exhausting the limit on the path the frontend calls must also exhaust it on
-    the compatibility prefix, because both reach the single registration.
+def test_the_broadcast_rate_limit_is_enforced_on_the_single_notification_path():
+    """1/minute on /notifications/send, and no second path to spend it twice.
+
+    The limit has to actually bite on the one path that serves broadcasts -
+    without the decorator the second call would succeed - and there must be no
+    other notification path, because slowapi keys a bucket on the request
+    path: a second prefix would be a second budget, and the limit this
+    asserts would silently become two.
     """
     app.dependency_overrides[dependencies.get_current_user] = lambda: {
         "id": 1, "username": "admin_user", "role": "admin", "is_admin": True
     }
+    # The 200 below queues a background fan-out; the test suite shares one
+    # in-memory database with the app (test_security_fixes.py patches
+    # database.SessionLocal), so rows another test added would be pushed for
+    # real. Empty the table so the assertion is about the limit, not delivery.
+    from database import PushSubscription
+    clear_db = TestSessionLocal()
+    clear_db.query(PushSubscription).delete()
+    clear_db.commit()
+    clear_db.close()
     dependencies.limiter.reset()
     try:
         client = TestClient(app)
@@ -1698,47 +1758,19 @@ def test_both_notification_prefixes_share_one_rate_limit_bucket():
         first = client.post("/notifications/send", json={"title": "First", "body": "b"})
         assert first.status_code == 200
 
-        second = client.post("/api/notifications/send", json={"title": "Second", "body": "b"})
+        # The second broadcast in the same minute is throttled: the limit is
+        # enforced on the path the frontend calls.
+        second = client.post("/notifications/send", json={"title": "Second", "body": "b"})
         assert second.status_code == 429, (
-            "a second broadcast through /api/notifications must be throttled by the same bucket"
+            "a second broadcast on /notifications/send must be throttled"
         )
 
-        # And it is throttled because the alias forwards to the one registration.
-        # 307 is the only redirect that preserves the method and the body.
+        # And the /api prefix does not exist to spend a second budget on.
         dependencies.limiter.reset()
-        forwarded = client.post(
-            "/api/notifications/send",
-            json={"title": "Third", "body": "b"},
-            follow_redirects=False,
+        aliased = client.post("/api/notifications/send", json={"title": "Third", "body": "b"})
+        assert aliased.status_code == 404, (
+            "/api/notifications must not be served: a second path would double the budget"
         )
-        assert forwarded.status_code == 307
-        assert forwarded.headers["location"] == "/notifications/send"
     finally:
         app.dependency_overrides.clear()
         dependencies.limiter.reset()
-
-
-def test_the_api_alias_is_auth_gated_like_the_endpoint_it_forwards_to():
-    """The alias adds no path that skips the auth dependency.
-
-    It is a forwarding route, so the endpoint's own router-level
-    get_current_user and the endpoint's require_admin are what gate it. A
-    request with no session and a request from a non-admin must both be
-    rejected on the /api prefix exactly as they are on the bare one.
-    """
-    client = TestClient(app)
-    dependencies.limiter.reset()
-
-    unauthenticated_bare = client.post("/notifications/send", json={"title": "t", "body": "b"})
-    unauthenticated_alias = client.post("/api/notifications/send", json={"title": "t", "body": "b"})
-    assert unauthenticated_bare.status_code == unauthenticated_alias.status_code == 401
-
-    app.dependency_overrides[dependencies.get_current_user] = lambda: {
-        "id": 2, "username": "regular_user", "role": "user", "is_admin": False
-    }
-    try:
-        denied_bare = client.post("/notifications/send", json={"title": "t", "body": "b"})
-        denied_alias = client.post("/api/notifications/send", json={"title": "t", "body": "b"})
-        assert denied_bare.status_code == denied_alias.status_code == 403
-    finally:
-        app.dependency_overrides.clear()
