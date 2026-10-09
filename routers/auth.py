@@ -30,10 +30,31 @@ DEFAULT_SESSION_SECONDS = 86_400   # 1 day
 DUMMY_BCRYPT_HASH = "$2b$12$k8Y6iX2t6tQk2tQk2tQk2e7k8Y6iX2t6tQk2tQk2tQk2e7k8Y6iX2"
 
 
+# ============================================================================
+# Password length: bcrypt's 72-byte limit
+# ============================================================================
+# bcrypt reads - and hashes - only the first 72 bytes of a password and raises
+# on anything longer, so truncating to those bytes is what keeps login from
+# crashing on "A" * 100. It is spelled out once, here, because a limit that
+# lives as an inline literal in two files is a limit that drifts: the seed
+# script's hashing must truncate to exactly the bytes this verifier reads, or a
+# seeded password and the login that follows it disagree about what the
+# password is.
+MAX_PASSWORD_BYTES = 72
+
+
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a password against its hash using bcrypt with 72-byte truncation safety"""
+    """Verify a password against its hash using bcrypt with 72-byte truncation safety.
+
+    The truncation stays on the login path on purpose, and must not become a
+    length check: a login that answers a too-long password differently from a
+    wrong one tells an attacker which of their guesses landed within a few
+    bytes of the limit, which is the very oracle the constant-time path below
+    is there to close. Calling code therefore never sees an exception here -
+    an over-long, malformed or unhashable password is simply not a match.
+    """
     try:
-        pw_bytes = plain_password.encode('utf-8')[:72]
+        pw_bytes = plain_password.encode('utf-8')[:MAX_PASSWORD_BYTES]
         return bcrypt.checkpw(pw_bytes, hashed_password.encode('utf-8'))
     except Exception:
         return False

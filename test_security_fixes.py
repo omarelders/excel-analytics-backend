@@ -6,6 +6,7 @@ import os
 import re
 import asyncio
 import hashlib
+import logging
 import subprocess
 import sys
 import importlib.util
@@ -38,8 +39,11 @@ database.SessionLocal = TestSessionLocal
 
 from database import Base, User, UserSession
 import dependencies
+import main
 from main import app
 import seed_users
+from routers import auth as auth_router
+from fastapi.middleware.cors import CORSMiddleware
 
 
 @pytest.fixture(autouse=True)
@@ -150,6 +154,132 @@ def test_security_headers_and_cors(monkeypatch):
     monkeypatch.setenv("ENV", "production")
     res_local_blocked = client.get("/health", headers={"Origin": "http://localhost:5173"})
     assert "access-control-allow-origin" not in res_local_blocked.headers
+
+
+PRODUCTION_ORIGINS = [
+    "https://roadtoonemillion.me",
+    "https://www.roadtoonemillion.me",
+]
+
+
+def _installed_cors_allow_origins() -> list:
+    """The allow-list the running app was actually built with.
+
+    Read off the middleware the app installed at import time, so a wiring test
+    compares what the app does rather than what a helper says it should do.
+    """
+    for middleware in app.user_middleware:
+        if middleware.cls is CORSMiddleware:
+            return list(middleware.kwargs["allow_origins"])
+    raise AssertionError("CORSMiddleware is not installed on the app")
+
+
+def test_cors_origins_refuses_localhost_in_production(caplog):
+    """A localhost CORS_ORIGINS entry cannot re-enter the production allow-list.
+
+    The allow-list is frozen when main is imported, so what is tested here is
+    build_cors_origins() itself - the one place the decision is now made - and
+    test_main_passes_cors_origins_through_the_validating_builder proves the app
+    actually uses it. monkeypatch.setenv would prove nothing against frozen
+    module state.
+    """
+    with caplog.at_level("WARNING", logger="main"):
+        origins = main.build_cors_origins(True, "http://localhost:5173,http://127.0.0.1:5173")
+
+    assert origins == PRODUCTION_ORIGINS, (
+        "a localhost/loopback entry must be refused in production, not appended"
+    )
+    assert "http://localhost:5173" not in origins
+    assert "http://127.0.0.1:5173" not in origins
+    # The refusal must not be silent: the operator has to be able to see which
+    # stale entry was dropped.
+    warning = "\n".join(record.getMessage() for record in caplog.records)
+    assert "http://localhost:5173" in warning
+    assert "http://127.0.0.1:5173" in warning
+
+
+def test_cors_origins_refuses_every_loopback_spelling_in_production(caplog):
+    """Any spelling of "this machine" is refused, including outside 127.0.0.1."""
+    loopback = [
+        "http://localhost:5173",
+        "http://LOCALHOST:5173",
+        "http://localhost",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000",
+        "http://127.55.55.55:8080",  # 127.0.0.0/8 is all loopback
+        "http://[::1]:5173",
+        "http://0.0.0.0:5173",
+    ]
+    with caplog.at_level("WARNING", logger="main"):
+        origins = main.build_cors_origins(True, ",".join(loopback))
+
+    assert origins == PRODUCTION_ORIGINS, loopback
+
+    # A non-loopback entry is still accepted in production, so the guard blocks
+    # loopback specifically rather than the whole variable.
+    with caplog.at_level("WARNING", logger="main"):
+        mixed = main.build_cors_origins(
+            True, "http://localhost:5173, https://admin.example.com"
+        )
+    assert mixed == PRODUCTION_ORIGINS + ["https://admin.example.com"]
+
+    # Substring matching would be a false positive here: this host is not this
+    # machine even though it contains "localhost".
+    with caplog.at_level("WARNING", logger="main"):
+        decoy = main.build_cors_origins(True, "https://notlocalhost.example.com")
+    assert decoy == PRODUCTION_ORIGINS + ["https://notlocalhost.example.com"]
+
+    # Garbage that cannot be a browser Origin at all is refused rather than
+    # appended, so a typo cannot quietly widen the allow-list.
+    with caplog.at_level("WARNING", logger="main"):
+        junk = main.build_cors_origins(True, "localhost:5173,example.com")
+    assert junk == PRODUCTION_ORIGINS
+
+
+def test_cors_origins_accepts_localhost_in_development(caplog):
+    """Development keeps the localhost origins, built-in and from the env."""
+    with caplog.at_level("WARNING", logger="main"):
+        origins = main.build_cors_origins(False, "http://localhost:5173")
+
+    assert "http://localhost:5173" in origins
+    assert "http://127.0.0.1:5173" in origins
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING], (
+        "nothing is refused in development"
+    )
+
+
+def test_main_passes_cors_origins_through_the_validating_builder():
+    """main.py builds its allow-list with the validating function, and nothing else.
+
+    The bug was that CORS_ORIGINS was appended *after* the production
+    restriction, so what has to hold is not "the list looks right today" but
+    "the list can only be produced by the function that refuses loopback". This
+    asserts the wiring on the app that is actually running plus the source of
+    main.py, because reading app state after monkeypatch.setenv would pass
+    vacuously: the allow-list is frozen at import time.
+    """
+    with open("main.py", "r", encoding="utf-8") as f:
+        source = f.read()
+
+    assert "cors_origins = build_cors_origins(" in source, (
+        "main.py must build its allow-list through build_cors_origins"
+    )
+    assert not re.search(r"cors_origins\s*(\.extend\(|\+=)", source), (
+        "extending the allow-list outside build_cors_origins bypasses the "
+        "production loopback check"
+    )
+    assert source.count('os.environ.get("CORS_ORIGINS"') == 1, (
+        "CORS_ORIGINS must be read once, by the call that validates it"
+    )
+
+    # The app installed exactly what the validating builder produces for the
+    # environment it was imported under.
+    expected = main.build_cors_origins(
+        main.is_production, os.environ.get("CORS_ORIGINS", "")
+    )
+    assert _installed_cors_allow_origins() == expected
+    assert main.is_production is True, "the suite runs under ENV=production"
+    assert all("localhost" not in origin for origin in _installed_cors_allow_origins())
 
 
 def test_global_exception_handler():
@@ -391,6 +521,82 @@ def test_seed_users_no_unicode_crash(monkeypatch):
     db.close()
 
 
+def test_bcrypt_password_limit_is_one_shared_constant():
+    """The 72-byte limit is a single constant, not an inline literal in two files.
+
+    Two truncation sites that each spell their own limit are two limits that
+    drift: the seed script would hash bytes the login verifier does not read,
+    and a password would stop matching the account it was created for.
+    """
+    assert auth_router.MAX_PASSWORD_BYTES == 72
+    assert seed_users.MAX_PASSWORD_BYTES == 72
+    assert seed_users.MAX_PASSWORD_BYTES is auth_router.MAX_PASSWORD_BYTES, (
+        "seed_users must import the constant from routers.auth, not redefine it"
+    )
+
+    for path in ("routers/auth.py", "seed_users.py"):
+        with open(path, "r", encoding="utf-8") as f:
+            source = f.read()
+        assert "MAX_PASSWORD_BYTES" in source, f"{path} must use the shared constant"
+        assert "[:72]" not in source, f"{path} still truncates with an inline 72 literal"
+
+
+def test_hash_password_refuses_to_truncate_a_long_password():
+    """hash_password raises instead of storing a hash of the password's prefix.
+
+    bcrypt 5 raises on anything over 72 bytes, so the only way a longer
+    password could be stored at all is by silently cutting it - which is how
+    "A"*72 and "A"*72+"extra" became the same credential.
+    """
+    with pytest.raises(seed_users.PasswordTooLongError) as excinfo:
+        seed_users.hash_password("A" * 73)
+    message = str(excinfo.value)
+    assert "73" in message and "72" in message, "the error must state the length and the limit"
+    assert "72 bytes" in message, "the error must say how to fix it"
+
+    # The boundary itself is still a valid password: exactly 72 bytes hashes.
+    hashed = seed_users.hash_password("A" * 72)
+    assert hashed.startswith("$2b$")
+    assert bcrypt.checkpw(b"A" * 72, hashed.encode("utf-8"))
+
+    # Bytes, not characters: 40 two-byte characters are 80 bytes and must be
+    # refused even though the string is only 40 long.
+    with pytest.raises(seed_users.PasswordTooLongError):
+        seed_users.hash_password("ب" * 40)
+    assert seed_users.hash_password("ب" * 36).startswith("$2b$")
+
+
+def test_seed_rejects_an_overlong_password_before_writing_anything(monkeypatch):
+    """A too-long SEED_*_PASSWORD names the variable to fix and creates no user.
+
+    Nothing may be written first: a half-seeded database plus a generic
+    "[ERROR] Seeding failed" line leaves the operator guessing which of the
+    three variables was wrong.
+    """
+    monkeypatch.setenv("SEED_ADMIN_PASSWORD", "A" * 80)
+    monkeypatch.delenv("SEED_OMAR_PASSWORD", raising=False)
+    monkeypatch.delenv("SEED_MARIAM_PASSWORD", raising=False)
+
+    with pytest.raises(seed_users.PasswordTooLongError) as excinfo:
+        seed_users.seed()
+
+    message = str(excinfo.value)
+    assert "SEED_ADMIN_PASSWORD" in message, "the error must name the variable to change"
+    assert "80" in message and "72" in message
+    assert "seed_users.py" in message, "the error must say what to run again"
+
+    db = TestSessionLocal()
+    assert db.query(User).count() == 0, "no user may be created from a refused password"
+    db.close()
+
+    # Exactly at the limit it seeds normally.
+    monkeypatch.setenv("SEED_ADMIN_PASSWORD", "B" * 72)
+    seed_users.seed()
+    db = TestSessionLocal()
+    assert db.query(User).filter(User.username == "omar").first() is not None
+    db.close()
+
+
 def test_rate_limiting_login_and_notifications():
     """Verify slowapi rate limits: login (5/min), file uploads (5/min), and push notifications (1/min)"""
     client = TestClient(app)
@@ -487,6 +693,58 @@ def test_login_timing_attack_mitigation():
     res_fake_long = client.post("/api/auth/login", data={"username": "no_such_user_123", "password": long_pw})
     assert res_fake_long.status_code == 401, "Long password on fake user must return 401"
     assert res_exist_long.json() == res_fake_long.json()
+
+
+def test_login_still_accepts_a_seventy_two_byte_password_and_rejects_no_length():
+    """Login truncates, it does not reject on length - a length check is an oracle.
+
+    A 401 for "password too long" would tell an attacker which guesses landed
+    near the 72-byte boundary, and distinguish an existing user's password from
+    a non-existent account. Both must stay a constant-shaped 401.
+    """
+    client = TestClient(app, raise_server_exceptions=False)
+    dependencies.limiter.reset()
+
+    salt = bcrypt.gensalt()
+    db = TestSessionLocal()
+    db.add(User(username="limit_tester", password_hash=bcrypt.hashpw(b"x" * 72, salt).decode("utf-8")))
+    db.commit()
+    db.close()
+
+    # A password of exactly the limit still logs in - the truncation must not
+    # have turned into an off-by-one rejection.
+    res_exact = client.post("/api/auth/login", data={"username": "limit_tester", "password": "x" * 72})
+    assert res_exact.status_code == 200, "a 72-byte password must still work"
+
+    # Over the limit, the answer is not a special one: the same password with
+    # extra bytes past the limit still logs in (bcrypt reads only the first 72
+    # bytes - the collision this guard documents), and a longer *wrong* password
+    # is just as wrong as a short one.
+    res_long_same = client.post(
+        "/api/auth/login", data={"username": "limit_tester", "password": "x" * 72 + "ignored-tail"}
+    )
+    assert res_long_same.status_code == 200, (
+        "login must not reject a password for being over 72 bytes"
+    )
+
+    res_long_wrong = client.post(
+        "/api/auth/login", data={"username": "limit_tester", "password": "y" * 100}
+    )
+    assert res_long_wrong.status_code == 401
+    assert res_long_wrong.json() == {"detail": "Invalid username or password"}
+
+    # ...and the same body as for a username that does not exist, so neither the
+    # length nor the truncation can be used to tell the two apart.
+    res_fake = client.post(
+        "/api/auth/login", data={"username": "no_such_limit_user", "password": "y" * 100}
+    )
+    assert res_fake.status_code == 401
+    assert res_fake.json() == res_long_wrong.json()
+
+    # verify_password keeps returning a plain False on a long wrong password
+    # instead of raising, which is what keeps it off the 500 path.
+    assert auth_router.verify_password("y" * 100, bcrypt.hashpw(b"x" * 72, salt).decode("utf-8")) is False
+    assert auth_router.verify_password("x" * 72, bcrypt.hashpw(b"x" * 72, salt).decode("utf-8")) is True
 
 
 def test_rbac_admin_guards():
@@ -1093,6 +1351,29 @@ def test_seed_users_prints_recovery_hint_for_existing_user(monkeypatch, capsys):
     assert omar.password_hash == original_hash, "Seeding must still not overwrite the existing user"
     assert omar.role == "user" and omar.is_admin is False
     db.close()
+
+
+def test_seed_users_script_exits_nonzero_on_an_overlong_password(tmp_path):
+    """The CLI reports the over-long password and exits 1, without a traceback.
+
+    The operator-facing path through `python seed_users.py` has to fail in a way
+    a deploy script can both detect and read.
+    """
+    db_url = f"sqlite:///{(tmp_path / 'seed.sqlite3').as_posix()}"
+    env = dict(os.environ, DATABASE_URL=db_url, SEED_ADMIN_PASSWORD="A" * 100)
+
+    result = subprocess.run(
+        [sys.executable, "seed_users.py"],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
+    assert "SEED_ADMIN_PASSWORD" in result.stdout
+    assert "72" in result.stdout
+    assert "Traceback" not in result.stdout + result.stderr
 
 
 def test_migration_002_invalidates_every_preexisting_session_exactly_once(tmp_path):

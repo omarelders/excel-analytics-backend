@@ -5,6 +5,7 @@ Refactored to use modular routers for better maintainability
 import os
 import logging
 from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
@@ -45,8 +46,84 @@ app = FastAPI(title="Gold Road API", lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# CORS Configuration: localhost origins only when ENV != 'production'
+# Read once, at import time: the allow-list below is frozen with the app, and
+# the secure-cookie default in routers/auth.py reads the same variable.
 is_production = os.getenv("ENV") == "production"
+
+# ============================================================================
+# CORS Configuration: localhost origins only when ENV != 'production'
+# ============================================================================
+# The allow-list is built by a function rather than assembled in place, because
+# of how the environment override used to be applied: it was appended *after*
+# the production restriction, so a stale or stray CORS_ORIGINS entry silently
+# put http://localhost:5173 back into the production allow-list. The
+# restriction now lives inside the construction, where every env entry is
+# either accepted or refused with a message naming the entry it refused.
+
+# Hostnames that can only mean "the machine the app runs on". Matched against
+# the parsed origin's hostname and never as a substring of the raw string:
+# "https://notlocalhost.example.com" contains "localhost" while pointing at
+# somebody else's server.
+LOCAL_ORIGIN_HOSTS = frozenset({"localhost", "127.0.0.1", "0.0.0.0", "::1"})
+
+# All of 127.0.0.0/8 is loopback, so 127.0.0.1 is not the only spelling of it.
+LOCAL_ORIGIN_HOST_PREFIX = "127."
+
+
+def _is_local_origin(origin: str) -> bool:
+    """True when the origin can only refer to the machine the app runs on."""
+    host = urlsplit(origin).hostname
+    if not host:
+        # Not an absolute origin at all - "", "localhost:5173", "example.com" -
+        # so it cannot be a browser's Origin. Treating it as unallowable is the
+        # only reading that cannot add something unintended.
+        return True
+    host = host.lower()
+    return host in LOCAL_ORIGIN_HOSTS or host.startswith(LOCAL_ORIGIN_HOST_PREFIX)
+
+
+def build_cors_origins(is_production: bool, extra_origins: str = "") -> list:
+    """Assemble the CORS allow-list for this deployment.
+
+    `extra_origins` is the raw comma-separated CORS_ORIGINS value. In production
+    an entry that resolves to localhost/loopback is refused with a warning
+    instead of being appended: a loopback origin in the production allow-list is
+    either a leftover development value or an attempt to make another machine's
+    traffic look first-party, and nothing legitimate in production needs one.
+    In development the same entries are accepted - that is what the local
+    frontend on :5173 talks to.
+    """
+    if is_production:
+        origins = [
+            "https://roadtoonemillion.me",
+            "https://www.roadtoonemillion.me",
+        ]
+    else:
+        origins = [
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "https://roadtoonemillion.me",
+            "https://www.roadtoonemillion.me",
+        ]
+
+    for raw in (extra_origins or "").split(","):
+        origin = raw.strip()
+        if not origin:
+            continue
+        if is_production and _is_local_origin(origin):
+            logger.warning(
+                "Refusing CORS_ORIGINS entry %r: localhost/loopback origins are not allowed in "
+                "the production CORS allow-list. Remove it from CORS_ORIGINS - production "
+                "allows the built-in roadtoonemillion.me origins plus any non-loopback "
+                "origins listed there.",
+                origin,
+            )
+            continue
+        origins.append(origin)
+
+    return origins
 
 # How many reverse proxies sit in front of the app (Heroku: 1). Read here, at
 # import time, for the same reason as is_production above: the rate limiter's key
@@ -59,25 +136,7 @@ logger.info(
     trusted_proxy_count,
 )
 
-if not is_production:
-    cors_origins = [
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "https://roadtoonemillion.me",
-        "https://www.roadtoonemillion.me",
-    ]
-else:
-    cors_origins = [
-        "https://roadtoonemillion.me",
-        "https://www.roadtoonemillion.me",
-    ]
-
-# Add extra origins from environment variable if configured
-extra_origins = os.environ.get("CORS_ORIGINS", "")
-if extra_origins:
-    cors_origins.extend([o.strip() for o in extra_origins.split(",") if o.strip()])
+cors_origins = build_cors_origins(is_production, os.environ.get("CORS_ORIGINS", ""))
 
 app.add_middleware(
     CORSMiddleware,
