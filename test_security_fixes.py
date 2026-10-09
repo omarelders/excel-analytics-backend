@@ -210,10 +210,21 @@ def test_cors_origins_refuses_every_loopback_spelling_in_production(caplog):
         "http://127.0.0.1:3000",
         "http://127.55.55.55:8080",  # 127.0.0.0/8 is all loopback
         "http://0177.0.0.1",  # octal for 127.0.0.1
+        "http://0x7f.0.0.1",  # hexadecimal for the same address
+        "http://127.000.000.001",  # zero-padded decimal
         "http://127.1",  # short form for 127.0.0.1
         "http://2130706433",  # the same address as one integer
         "http://[::1]:5173",
+        "http://[::ffff:127.0.0.1]:5173",  # IPv4-mapped IPv6 loopback
         "http://0.0.0.0:5173",
+        # The trailing dot is the DNS root label and names the same host without
+        # it, and neither ipaddress nor inet_aton accepts it - so an unstripped
+        # "127.1." parses as neither an IP nor a name.
+        "http://localhost.:5173",
+        "http://127.0.0.1.:5173",
+        "http://127.1.",
+        "http://0.0.0.0.",
+        "http://app.localhost.",
     ]
     with caplog.at_level("WARNING", logger="main"):
         origins = main.build_cors_origins(True, ",".join(loopback))
@@ -229,14 +240,18 @@ def test_cors_origins_refuses_every_loopback_spelling_in_production(caplog):
     assert mixed == PRODUCTION_ORIGINS + ["https://extra.example.com"]
 
     # Substring matching would be a false positive here: these hosts are not
-    # this machine even though they contain "localhost".
+    # this machine even though they contain "localhost". The trailing dot is the
+    # root label and does not change who they belong to either.
     with caplog.at_level("WARNING", logger="main"):
         decoys = main.build_cors_origins(
-            True, "https://notlocalhost.example.com,http://localhost.evil.com"
+            True,
+            "https://notlocalhost.example.com,http://localhost.evil.com,"
+            "http://roadtoonemillion.me.",
         )
     assert decoys == PRODUCTION_ORIGINS + [
         "https://notlocalhost.example.com",
         "http://localhost.evil.com",
+        "http://roadtoonemillion.me.",
     ]
 
     # Garbage that cannot be a browser Origin at all is refused rather than
@@ -244,6 +259,42 @@ def test_cors_origins_refuses_every_loopback_spelling_in_production(caplog):
     with caplog.at_level("WARNING", logger="main"):
         junk = main.build_cors_origins(True, "localhost:5173,example.com")
     assert junk == PRODUCTION_ORIGINS
+
+
+def test_cors_origins_treats_the_dns_root_dot_as_the_same_host():
+    """A trailing dot names the same host without it, in both directions.
+
+    The dot is the DNS root label, so "127.1." is 127.0.0.1 and "localhost." is
+    localhost - and "roadtoonemillion.me." is still somebody else's server.
+    Either parser in _is_loopback_ip rejects a trailing dot, so the host has to
+    be normalised before it is interpreted, or the dot becomes a way to spell a
+    loopback host that is not recognised as one.
+
+    Asserted through the predicate as well as through build_cors_origins, so the
+    refusal and the "do not over-block" side fail separately.
+    """
+    loopback = [
+        "http://localhost.:5173",
+        "http://127.0.0.1.:5173",
+        "http://127.1.",
+        "http://0.0.0.0.",
+        "http://app.localhost.",
+    ]
+    for origin in loopback:
+        assert main._is_local_origin(origin), origin
+
+    origins = main.build_cors_origins(True, ",".join(loopback))
+    assert origins == PRODUCTION_ORIGINS, origins
+
+    # Stripping the root label must not turn another domain into this machine.
+    accepted = [
+        "https://notlocalhost.example.com",
+        "http://roadtoonemillion.me.",
+        "http://localhost.evil.com.",
+    ]
+    for origin in accepted:
+        assert not main._is_local_origin(origin), origin
+    assert main.build_cors_origins(True, ",".join(accepted)) == PRODUCTION_ORIGINS + accepted
 
 
 def test_cors_origins_accepts_localhost_in_development(caplog):

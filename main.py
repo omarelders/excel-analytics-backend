@@ -104,6 +104,17 @@ def _is_local_origin(origin: str) -> bool:
         return True
     host = host.lower()
 
+    # The trailing dot is the DNS root label, and it names the same host without
+    # it: "localhost." is localhost, "127.0.0.1." is 127.0.0.1. Neither parser
+    # below accepts it, so an unstripped "127.1." would parse as neither an IP
+    # nor a name and be read as non-loopback - a spelling of this machine
+    # reaching the production allow-list. Only the root label is removed, so
+    # "localhost.evil.com" keeps every label it has and stays somebody else's.
+    host = host.rstrip(".")
+    if not host:
+        # Nothing but dots: not a host, so not something to allow.
+        return True
+
     # RFC 6761: every name ending in ".localhost" resolves to loopback, so
     # "app.localhost" is this machine exactly as "localhost" is.
     if host == "localhost" or host.endswith(".localhost"):
