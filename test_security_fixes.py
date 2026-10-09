@@ -204,9 +204,14 @@ def test_cors_origins_refuses_every_loopback_spelling_in_production(caplog):
         "http://localhost:5173",
         "http://LOCALHOST:5173",
         "http://localhost",
+        "http://app.localhost:5173",  # RFC 6761: every .localhost name is loopback
+        "http://a.b.localhost:5173",
         "http://127.0.0.1:5173",
         "http://127.0.0.1:3000",
         "http://127.55.55.55:8080",  # 127.0.0.0/8 is all loopback
+        "http://0177.0.0.1",  # octal for 127.0.0.1
+        "http://127.1",  # short form for 127.0.0.1
+        "http://2130706433",  # the same address as one integer
         "http://[::1]:5173",
         "http://0.0.0.0:5173",
     ]
@@ -219,15 +224,20 @@ def test_cors_origins_refuses_every_loopback_spelling_in_production(caplog):
     # loopback specifically rather than the whole variable.
     with caplog.at_level("WARNING", logger="main"):
         mixed = main.build_cors_origins(
-            True, "http://localhost:5173, https://admin.example.com"
+            True, "http://localhost:5173, https://extra.example.com"
         )
-    assert mixed == PRODUCTION_ORIGINS + ["https://admin.example.com"]
+    assert mixed == PRODUCTION_ORIGINS + ["https://extra.example.com"]
 
-    # Substring matching would be a false positive here: this host is not this
-    # machine even though it contains "localhost".
+    # Substring matching would be a false positive here: these hosts are not
+    # this machine even though they contain "localhost".
     with caplog.at_level("WARNING", logger="main"):
-        decoy = main.build_cors_origins(True, "https://notlocalhost.example.com")
-    assert decoy == PRODUCTION_ORIGINS + ["https://notlocalhost.example.com"]
+        decoys = main.build_cors_origins(
+            True, "https://notlocalhost.example.com,http://localhost.evil.com"
+        )
+    assert decoys == PRODUCTION_ORIGINS + [
+        "https://notlocalhost.example.com",
+        "http://localhost.evil.com",
+    ]
 
     # Garbage that cannot be a browser Origin at all is refused rather than
     # appended, so a typo cannot quietly widen the allow-list.
@@ -257,6 +267,8 @@ def test_main_passes_cors_origins_through_the_validating_builder():
     asserts the wiring on the app that is actually running plus the source of
     main.py, because reading app state after monkeypatch.setenv would pass
     vacuously: the allow-list is frozen at import time.
+    test_cors_origins_env_override_cannot_reintroduce_localhost_in_production is
+    the behavioral half - it boots the app with the variable set.
     """
     with open("main.py", "r", encoding="utf-8") as f:
         source = f.read()
@@ -268,8 +280,11 @@ def test_main_passes_cors_origins_through_the_validating_builder():
         "extending the allow-list outside build_cors_origins bypasses the "
         "production loopback check"
     )
-    assert source.count('os.environ.get("CORS_ORIGINS"') == 1, (
-        "CORS_ORIGINS must be read once, by the call that validates it"
+    env_reads = re.findall(
+        r"os\.(?:environ\.get|getenv)\(\s*['\"]CORS_ORIGINS['\"]", source
+    )
+    assert len(env_reads) == 1, (
+        "CORS_ORIGINS must be read exactly once, by the call that validates it"
     )
 
     # The app installed exactly what the validating builder produces for the
@@ -279,7 +294,70 @@ def test_main_passes_cors_origins_through_the_validating_builder():
     )
     assert _installed_cors_allow_origins() == expected
     assert main.is_production is True, "the suite runs under ENV=production"
-    assert all("localhost" not in origin for origin in _installed_cors_allow_origins())
+    assert all(
+        not main._is_local_origin(origin)
+        for origin in _installed_cors_allow_origins()
+    ), "the installed production allow-list must contain no loopback origin"
+
+
+# Booted in a fresh interpreter on purpose: main.py reads CORS_ORIGINS at import
+# time, so an in-process monkeypatch.setenv can only ever move module state that
+# has already been frozen. Print, do not raise, so the parent asserts on what
+# the real CORSMiddleware answered.
+_CORS_PROBE = """
+from fastapi.testclient import TestClient
+import main
+
+client = TestClient(main.app)
+print("ALLOWLIST " + ",".join(main.cors_origins))
+for origin in ("http://localhost:5173", "https://extra.example.com"):
+    response = client.get("/health", headers={"Origin": origin})
+    print("ACAO " + origin + " -> " + (response.headers.get("access-control-allow-origin") or "<none>"))
+"""
+
+
+def test_cors_origins_env_override_cannot_reintroduce_localhost_in_production(tmp_path):
+    """A booted production app refuses a localhost CORS_ORIGINS entry end to end.
+
+    Running the app in a subprocess with the variable set is what makes this
+    behavioral rather than textual: the old bug - the env override appended
+    after the production restriction - is invisible in-process, where the
+    allow-list was already frozen without the variable, and visible here,
+    where the boot reads it.
+    """
+    db_url = f"sqlite:///{(tmp_path / 'cors.sqlite3').as_posix()}"
+    env = dict(
+        os.environ,
+        ENV="production",
+        DATABASE_URL=db_url,
+        TRUSTED_PROXY_COUNT="1",
+        CORS_ORIGINS="http://localhost:5173,https://extra.example.com",
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", _CORS_PROBE],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+
+    assert "ACAO http://localhost:5173 -> <none>" in result.stdout, (
+        "a localhost entry refused at the allow-list must not be echoed by the "
+        "middleware either",
+        result.stdout,
+        result.stderr,
+    )
+    assert "ACAO https://extra.example.com -> https://extra.example.com" in result.stdout, (
+        "a non-loopback entry is still a legitimate production origin",
+        result.stdout,
+        result.stderr,
+    )
+    assert "Refusing CORS_ORIGINS entry 'http://localhost:5173'" in (
+        result.stdout + result.stderr
+    ), "the refusal must name the entry it dropped"
 
 
 def test_global_exception_handler():

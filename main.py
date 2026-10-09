@@ -4,6 +4,8 @@ Refactored to use modular routers for better maintainability
 """
 import os
 import logging
+import ipaddress
+import socket
 from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
 from fastapi import FastAPI, Request, HTTPException
@@ -60,14 +62,36 @@ is_production = os.getenv("ENV") == "production"
 # restriction now lives inside the construction, where every env entry is
 # either accepted or refused with a message naming the entry it refused.
 
-# Hostnames that can only mean "the machine the app runs on". Matched against
-# the parsed origin's hostname and never as a substring of the raw string:
-# "https://notlocalhost.example.com" contains "localhost" while pointing at
-# somebody else's server.
-LOCAL_ORIGIN_HOSTS = frozenset({"localhost", "127.0.0.1", "0.0.0.0", "::1"})
+# What counts as "this machine" is decided from the parsed origin's hostname and
+# never as a substring of the raw string: "https://notlocalhost.example.com" and
+# "http://localhost.evil.com" both contain "localhost" while pointing at somebody
+# else's server.
 
-# All of 127.0.0.0/8 is loopback, so 127.0.0.1 is not the only spelling of it.
-LOCAL_ORIGIN_HOST_PREFIX = "127."
+
+def _is_loopback_ip(host: str) -> bool:
+    """True for an IP literal that resolves to this machine.
+
+    The address is parsed rather than prefix-matched, because "127." catches
+    only one of loopback's spellings: 127.55.55.55, ::1 and 0177.0.0.1 all reach
+    this machine and none of them starts with "127.". ipaddress parses the
+    decimal forms and deliberately refuses the ambiguous ones (leading zeros,
+    short forms, a bare integer), so socket.inet_aton is the fallback for those
+    - it is what a resolver accepts, and "0177.0.0.1" is octal for 127.0.0.1.
+
+    A hostname that neither parser accepts is not an IP at all, which is the
+    normal case ("example.com", "roadtoonemillion.me") and is not loopback.
+    """
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        try:
+            address = ipaddress.IPv4Address(socket.inet_aton(host))
+        except OSError:
+            return False
+
+    # 0.0.0.0 is "unspecified" rather than loopback, but it names this host's
+    # own interfaces, so it is no more usable in a production allow-list.
+    return address.is_loopback or address.is_unspecified
 
 
 def _is_local_origin(origin: str) -> bool:
@@ -79,7 +103,13 @@ def _is_local_origin(origin: str) -> bool:
         # only reading that cannot add something unintended.
         return True
     host = host.lower()
-    return host in LOCAL_ORIGIN_HOSTS or host.startswith(LOCAL_ORIGIN_HOST_PREFIX)
+
+    # RFC 6761: every name ending in ".localhost" resolves to loopback, so
+    # "app.localhost" is this machine exactly as "localhost" is.
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+
+    return _is_loopback_ip(host)
 
 
 def build_cors_origins(is_production: bool, extra_origins: str = "") -> list:
