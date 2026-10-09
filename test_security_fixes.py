@@ -9,6 +9,7 @@ import hashlib
 import subprocess
 import sys
 import importlib.util
+from urllib.parse import urlsplit
 import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
@@ -637,14 +638,82 @@ def test_pinned_requirements_and_no_passlib():
         assert "==" in line, f"Package requirement '{line}' must be pinned with exact version (==)"
 
 
+def _csp_directives(csp):
+    """Parse a Content-Security-Policy header into {directive: [tokens]}."""
+    directives = {}
+    for chunk in csp.split(";"):
+        name, _, values = chunk.strip().partition(" ")
+        if name:
+            directives[name] = values.split()
+    return directives
+
+
 def test_swagger_docs_csp_compatibility():
-    """Verify CSP allows Swagger UI resources from CDN so /docs works in browsers"""
+    """The docs pages render under their own policy, verified against the HTML.
+
+    Updated for the split policy. The old shape - two substring checks that
+    "https://cdn.jsdelivr.net" and "https://fastapi.tiangolo.com" appear
+    somewhere in one global CSP - is exactly what a global policy could
+    satisfy and what a per-page allowlist must be verified differently: a
+    substring can be satisfied by any directive, so it says nothing about
+    whether the directive that governs a given element actually allows it.
+    This test now reads each docs page, extracts every script/link/style
+    reference the template emits, and checks it against the directive that
+    governs that element - the CDN scripts and stylesheets, the favicon image,
+    the inline blocks (SwaggerUIBundle(), ReDoc's body style, the OAuth2
+    redirect page), and the runtime fetch of the schema - then pins the
+    allowlist to the exact set of origins those pages load. The two origins
+    the old test named are still asserted, inside that exact set.
+    """
     client = TestClient(app)
-    res = client.get("/docs")
-    assert res.status_code == 200
-    csp = res.headers.get("content-security-policy", "")
-    assert "https://cdn.jsdelivr.net" in csp
-    assert "https://fastapi.tiangolo.com" in csp
+
+    for path in ("/docs", "/redoc", "/docs/oauth2-redirect"):
+        res = client.get(path)
+        assert res.status_code == 200, path
+        csp = res.headers["content-security-policy"]
+        directives = _csp_directives(csp)
+
+        # Every element the template emits must be permitted by the directive
+        # that governs it.
+        for tag, attrs in re.findall(r"<(script|link|style)([^>]*)>", res.text):
+            url = re.search(r'(?:src|href)="([^"]+)"', attrs)
+            if url:
+                parsed = urlsplit(url.group(1))
+                directive = (
+                    "script-src" if tag == "script"
+                    else "style-src" if "stylesheet" in attrs
+                    else "img-src"
+                )
+                origin = f"{parsed.scheme}://{parsed.netloc}"
+                assert origin in directives[directive], (
+                    f"{path}: {url.group(1)} is blocked by {directive}"
+                )
+            else:
+                # A script or style block with no source: inline by definition.
+                inline_directive = "script-src" if tag == "script" else "style-src"
+                assert "'unsafe-inline'" in directives[inline_directive], (
+                    f"{path}: the template's inline <{tag}> is blocked by {inline_directive}"
+                )
+
+        # Swagger UI fetches the schema at runtime, from this same origin.
+        assert "'self'" in directives["connect-src"], path
+
+    # The allowlist is exactly what these pages load - nothing else. The old
+    # global policy named the frontend's own origins in connect-src, which is
+    # what made it a global policy rather than a docs allowlist.
+    docs_csp = client.get("/docs").headers["content-security-policy"]
+    allowed = {
+        token
+        for directive in ("script-src", "style-src", "img-src", "connect-src", "font-src")
+        for token in _csp_directives(docs_csp)[directive]
+        if "://" in token
+    }
+    assert allowed == {
+        "https://cdn.jsdelivr.net",       # swagger-ui.css / swagger-ui-bundle.js / redoc.standalone.js
+        "https://fastapi.tiangolo.com",   # the favicon both pages link
+        "https://fonts.googleapis.com",    # ReDoc's stylesheet
+        "https://fonts.gstatic.com",      # the font files that stylesheet fetches
+    }
 
 
 def test_alembic_migrations_chain():
@@ -1474,6 +1543,202 @@ def test_spoofed_forwarded_for_cannot_rotate_the_bucket_under_the_launcher_polic
     assert keys == {"198.51.100.99"}
 
 
+# ============================================================================
+# Task 3 — response header hygiene
+# ============================================================================
+# Three defects in main.py, all of them "one policy for everything":
+#
+#   * Cache-Control: no-store was set on every response, so /docs and the
+#     assets the Swagger UI page loads were uncacheable and re-downloaded on
+#     every visit.
+#   * one Content-Security-Policy served both the API and the docs page. The
+#     docs page needs an inline script, so every /api/ response carried
+#     'unsafe-inline' in script-src - which is not an XSS defence at all.
+#   * notifications.router was included twice (bare and under /api), and
+#     because slowapi keys a decorated limit on the request path, the admin
+#     broadcast endpoint had two independent 1/minute buckets: two broadcasts a
+#     minute instead of one.
+#
+# The fix splits the header policy by path, and serves the second prefix with
+# an alias route that forwards to the single router registration.
+# test_swagger_docs_csp_compatibility already existed above (it predates this
+# task); it is updated in place there - kept at its original location rather
+# than shadowed by a second definition lower down - so the docs policy is
+# asserted where the docs-surface test has always lived.
 
 
+def _an_api_response(client):
+    """A real /api/ response. Reset first: the login limit is 5/minute."""
+    dependencies.limiter.reset()
+    return client.post(
+        "/api/auth/login", data={"username": "no_such_user_here", "password": "whatever"}
+    )
 
+
+def test_cache_control_no_store_is_scoped_to_the_api_surface():
+    """no-store belongs to the API surface, not to every response.
+
+    Set on everything it made the docs page and the assets it loads
+    uncacheable; dropped entirely it would let a browser keep a session-bearing
+    API response. It has to be exactly one of the two surfaces, and the paths
+    that are not API must not carry any header that forbids reuse either.
+    """
+    client = TestClient(app)
+
+    api_res = _an_api_response(client)
+    assert api_res.status_code == 401
+    assert api_res.headers.get("cache-control") == "no-store"
+
+    for path in ("/health", "/docs", "/openapi.json"):
+        res = client.get(path)
+        assert res.status_code == 200
+        assert "cache-control" not in res.headers, (
+            f"{path} is not part of the API surface and must stay cacheable"
+        )
+
+
+def test_api_csp_has_no_inline_script_and_names_no_origin():
+    """The API surface gets a script-src that actually means something.
+
+    One policy was shipped for the whole app because of the docs page, and the
+    docs page needs an inline script - so every /api/ response carried a
+    script-src that any injected markup satisfies. The API surface never
+    renders a document, so it gets a policy with no inline script, no
+    third-party origin, and the hardening that survives a later widening of
+    script-src.
+    """
+    client = TestClient(app)
+
+    scoped = (
+        ("/api/", _an_api_response(client)),
+        ("/health", client.get("/health")),
+        ("/openapi.json", client.get("/openapi.json")),
+    )
+    for label, response in scoped:
+        assert response.status_code in (200, 401), label
+        csp = response.headers["content-security-policy"]
+        directives = _csp_directives(csp)
+        assert directives["script-src"] == ["'self'"], label
+        assert "'unsafe-inline'" not in csp, label
+        for directive, tokens in directives.items():
+            for token in tokens:
+                assert "://" not in token, (
+                    f"{label}: {directive} names {token}, which the API surface does not load"
+                )
+        assert directives["object-src"] == ["'none'"], label
+        assert directives["frame-ancestors"] == ["'none'"], label
+        assert directives["default-src"] == ["'self'"], label
+
+
+def _notifications_router_registrations():
+    """Every registration of the notifications router, read off the app.
+
+    FastAPI 0.142 nests an included router in an _IncludedRouter wrapper
+    instead of flattening its routes into app.routes, so the count has to be
+    read off that wrapper. What the wrapper exposes - one registration object
+    per include_router() call - is exactly what the doubled budget hid behind.
+    """
+    import routers.notifications as notifications_router
+
+    return [
+        route for route in app.routes
+        if type(route).__name__ == "_IncludedRouter"
+        and getattr(route, "original_router", None) is notifications_router.router
+    ]
+
+
+def test_the_notifications_router_is_registered_exactly_once():
+    """Two registrations are two paths, and two paths are two buckets.
+
+    slowapi keys a decorated limit on the request path, so including the router
+    twice gave the 1/minute broadcast endpoint two independent budgets. The
+    /api prefix is still served, but by an alias that forwards to this one
+    registration.
+    """
+    registrations = _notifications_router_registrations()
+    assert len(registrations) == 1, (
+        "notifications.router must be included once: a second registration is a second "
+        "1/minute bucket on the broadcast endpoint, not extra capacity"
+    )
+    assert not registrations[0].include_context.prefix, (
+        "the single registration must live on the bare prefix the frontend calls"
+    )
+
+
+def test_the_notification_path_set_is_the_intended_one():
+    """Both prefixes answer, and the schema lists each endpoint once.
+
+    The alias that serves /api/notifications/* is not in the OpenAPI schema,
+    so the schema is the exact set of endpoints the router really defines - and
+    a second include_router() would have left an /api/notifications/* duplicate
+    of all four behind.
+    """
+    paths = sorted(path for path in app.openapi()["paths"] if "notifications" in path)
+    assert paths == [
+        "/notifications/send",
+        "/notifications/subscribe",
+        "/notifications/unsubscribe",
+        "/notifications/vapid-key",
+    ]
+
+
+def test_both_notification_prefixes_share_one_rate_limit_bucket():
+    """One broadcast a minute in total, not one per prefix.
+
+    Exhausting the limit on the path the frontend calls must also exhaust it on
+    the compatibility prefix, because both reach the single registration.
+    """
+    app.dependency_overrides[dependencies.get_current_user] = lambda: {
+        "id": 1, "username": "admin_user", "role": "admin", "is_admin": True
+    }
+    dependencies.limiter.reset()
+    try:
+        client = TestClient(app)
+
+        first = client.post("/notifications/send", json={"title": "First", "body": "b"})
+        assert first.status_code == 200
+
+        second = client.post("/api/notifications/send", json={"title": "Second", "body": "b"})
+        assert second.status_code == 429, (
+            "a second broadcast through /api/notifications must be throttled by the same bucket"
+        )
+
+        # And it is throttled because the alias forwards to the one registration.
+        # 307 is the only redirect that preserves the method and the body.
+        dependencies.limiter.reset()
+        forwarded = client.post(
+            "/api/notifications/send",
+            json={"title": "Third", "body": "b"},
+            follow_redirects=False,
+        )
+        assert forwarded.status_code == 307
+        assert forwarded.headers["location"] == "/notifications/send"
+    finally:
+        app.dependency_overrides.clear()
+        dependencies.limiter.reset()
+
+
+def test_the_api_alias_is_auth_gated_like_the_endpoint_it_forwards_to():
+    """The alias adds no path that skips the auth dependency.
+
+    It is a forwarding route, so the endpoint's own router-level
+    get_current_user and the endpoint's require_admin are what gate it. A
+    request with no session and a request from a non-admin must both be
+    rejected on the /api prefix exactly as they are on the bare one.
+    """
+    client = TestClient(app)
+    dependencies.limiter.reset()
+
+    unauthenticated_bare = client.post("/notifications/send", json={"title": "t", "body": "b"})
+    unauthenticated_alias = client.post("/api/notifications/send", json={"title": "t", "body": "b"})
+    assert unauthenticated_bare.status_code == unauthenticated_alias.status_code == 401
+
+    app.dependency_overrides[dependencies.get_current_user] = lambda: {
+        "id": 2, "username": "regular_user", "role": "user", "is_admin": False
+    }
+    try:
+        denied_bare = client.post("/notifications/send", json={"title": "t", "body": "b"})
+        denied_alias = client.post("/api/notifications/send", json={"title": "t", "body": "b"})
+        assert denied_bare.status_code == denied_alias.status_code == 403
+    finally:
+        app.dependency_overrides.clear()
