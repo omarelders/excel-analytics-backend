@@ -4,17 +4,17 @@ Comprehensive verification test suite for Priority 0 and Priority 1 backend secu
 import io
 import os
 import hashlib
-import uuid
 import subprocess
 import sys
 import importlib.util
-from datetime import datetime
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, event, inspect
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 import bcrypt
+from alembic.operations import Operations
+from alembic.runtime.migration import MigrationContext
 
 # Setup test environment
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
@@ -676,6 +676,53 @@ def _migration_002():
     )
 
 
+def _sqlite_migration_engine(tmp_path, name="migration.sqlite3"):
+    """A real file-backed SQLite engine, so the DDL under test really executes."""
+    engine = create_engine(f"sqlite:///{(tmp_path / name).as_posix()}")
+    return engine
+
+
+def _create_pre_002_schema(engine):
+    """users / user_sessions / push_subscriptions as they existed before revision 002.
+
+    users has no role or is_admin column - that is the state 002 has to add columns to.
+    user_sessions holds a plaintext uuid4 row plus a SHA-256 hash row.
+    """
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, password_hash TEXT)"
+        ))
+        conn.execute(text(
+            "CREATE TABLE user_sessions ("
+            " token VARCHAR(64) PRIMARY KEY, user_id INTEGER NOT NULL,"
+            " created_at DATETIME, expires_at DATETIME NOT NULL,"
+            " FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE)"
+        ))
+        conn.execute(text(
+            "CREATE TABLE push_subscriptions ("
+            " id INTEGER PRIMARY KEY, endpoint VARCHAR, p256dh VARCHAR NOT NULL,"
+            " auth VARCHAR NOT NULL, created_at DATETIME)"
+        ))
+        conn.execute(text(
+            "INSERT INTO users (id, username, password_hash) VALUES (1, 'omar', 'hash')"
+        ))
+        conn.execute(text(
+            "INSERT INTO user_sessions (token, user_id, expires_at) VALUES"
+            " ('legacy-plaintext-uuid4-row', 1, '2026-01-01'),"
+            " ('%s', 1, '2026-01-01')" % ("a" * 64)
+        ))
+
+
+def _column_names(engine, table_name):
+    with engine.connect() as conn:
+        return [column["name"] for column in inspect(conn).get_columns(table_name)]
+
+
+def _table_names(engine):
+    with engine.connect() as conn:
+        return sorted(inspect(conn).get_table_names())
+
+
 def test_promote_admin_grants_admin_and_passes_require_admin():
     """A pre-migration user (role='user', is_admin=False) must be recoverable, then pass require_admin"""
     # 1. Reproduce the audited defect: a user that already existed before migration 002.
@@ -792,7 +839,7 @@ def test_promote_admin_cli_end_to_end(tmp_path):
 
     # Unknown username -> non-zero exit with a clear message.
     missing = run("ghost")
-    assert missing.returncode != 0
+    assert missing.returncode == 1, "an unknown username is exit 1 (user not found), not an environment error"
     assert "ghost" in missing.stdout + missing.stderr
 
     # Promote -> exit 0 and the documented success line.
@@ -815,6 +862,92 @@ def test_promote_admin_cli_end_to_end(tmp_path):
     engine.dispose()
 
 
+def test_promote_admin_cli_reports_a_schema_error_distinctly(tmp_path):
+    """A database with no users table is an environment error: exit 3, with a hint.
+
+    This is not "that user does not exist" (exit 1) - the schema is missing - so it
+    must get its own exit code, or a scripted caller cannot tell the two apart.
+    """
+    script_path = os.path.join(REPO_ROOT, "scripts", "promote_admin.py")
+    empty_db = f"sqlite:///{(tmp_path / 'empty.sqlite3').as_posix()}"
+    env = dict(os.environ, DATABASE_URL=empty_db)
+
+    result = subprocess.run(
+        [sys.executable, script_path, "omar"],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 3, (result.returncode, result.stdout, result.stderr)
+    assert "[ERROR] Could not promote 'omar'" in result.stdout
+    assert "run_migrations.py" in result.stdout
+    assert "Traceback" not in result.stdout + result.stderr
+
+
+def test_promote_admin_promotes_writes_no_transaction_when_already_admin(tmp_path):
+    """Promoting an existing admin must be a read-only no-op.
+
+    Proven with a real SQLite database and a real sessionmaker: after_commit is a real
+    SQLAlchemy event that fires once per committed transaction, so it distinguishes
+    "returned without committing" from "committed". A re-run must not open a write
+    transaction at all.
+    """
+    promote_admin = _load_module("promote_admin_under_test", os.path.join("scripts", "promote_admin.py"))
+
+    engine = create_engine(f"sqlite:///{(tmp_path / 'already_admin.sqlite3').as_posix()}")
+    try:
+        Base.metadata.create_all(bind=engine)
+        Session = sessionmaker(bind=engine)
+        db = Session()
+        db.add(User(username="mariam", password_hash="h" * 60, role="admin", is_admin=True))
+        db.commit()
+        db.close()
+
+        commits = []
+        event.listen(Session, "after_commit", lambda session: commits.append(1))
+
+        db = Session()
+        message = promote_admin.promote_user(db, "mariam")
+        db.close()
+        assert "already admin" in message
+        assert commits == [], "promoting an existing admin must not commit"
+
+        # The row is still admin, and its password hash was never touched.
+        db = Session()
+        mariam = db.query(User).filter_by(username="mariam").first()
+        assert mariam.role == "admin" and mariam.is_admin is True
+        assert mariam.password_hash == "h" * 60
+        db.close()
+    finally:
+        engine.dispose()
+
+
+def test_promote_admin_promotes_writes_a_transaction_when_promoting(tmp_path):
+    """Positive control for the no-write test: a real promotion does commit."""
+    promote_admin = _load_module("promote_admin_under_test", os.path.join("scripts", "promote_admin.py"))
+
+    engine = create_engine(f"sqlite:///{(tmp_path / 'needs_promote.sqlite3').as_posix()}")
+    try:
+        Base.metadata.create_all(bind=engine)
+        Session = sessionmaker(bind=engine)
+        db = Session()
+        db.add(User(username="omar", password_hash="h" * 60, role="user", is_admin=False))
+        db.commit()
+        db.close()
+
+        commits = []
+        event.listen(Session, "after_commit", lambda session: commits.append(1))
+
+        db = Session()
+        message = promote_admin.promote_user(db, "omar")
+        db.close()
+        assert "user 'omar' is now admin" in message
+        assert commits == [1], "a real promotion must commit the change"
+    finally:
+        engine.dispose()
+
+
 def test_promote_admin_list_reports_a_usable_error_when_schema_is_missing(monkeypatch, capsys):
     """--list must not dump a traceback on an operator whose database has no tables yet"""
     promote_admin = _load_module("promote_admin_under_test", os.path.join("scripts", "promote_admin.py"))
@@ -828,11 +961,32 @@ def test_promote_admin_list_reports_a_usable_error_when_schema_is_missing(monkey
 
     monkeypatch.setattr(promote_admin, "SessionLocal", _SchemaMissingSession)
 
-    assert promote_admin.main(["--list"]) == 1
+    assert promote_admin.main(["--list"]) == 3
     out = capsys.readouterr().out
     assert "[ERROR] Could not list users" in out
     assert "run_migrations.py" in out
     assert "Traceback" not in out
+
+
+def test_promote_admin_survives_a_session_that_cannot_be_built(monkeypatch, capsys):
+    """A SessionLocal() that raises must not escape main() as a traceback.
+
+    SessionLocal() construction happens against the real engine, so an unbound engine or
+    a bad DATABASE_URL fails here - inside main(), not outside it.
+    """
+    promote_admin = _load_module("promote_admin_under_test", os.path.join("scripts", "promote_admin.py"))
+
+    def _broken_session_factory():
+        raise RuntimeError("misconfigured DATABASE_URL")
+
+    monkeypatch.setattr(promote_admin, "SessionLocal", _broken_session_factory)
+
+    for argv in (["--list"], ["omar"]):
+        ret = promote_admin.main(argv)
+        assert ret == 3, argv
+        out = capsys.readouterr().out
+        assert "[ERROR]" in out, argv
+        assert "Traceback" not in out, argv
 
 
 def test_seed_users_prints_recovery_hint_for_existing_user(monkeypatch, capsys):
@@ -855,167 +1009,139 @@ def test_seed_users_prints_recovery_hint_for_existing_user(monkeypatch, capsys):
     db.close()
 
 
-def test_migration_002_invalidates_legacy_sessions_only_once():
-    """Migration 002 deletes pre-hash session tokens, keeps hashed ones, and is a no-op on re-run"""
-    migration = _migration_002()
+def test_migration_002_invalidates_every_preexisting_session_exactly_once(tmp_path):
+    """The blanket DELETE runs, and is a no-op on a re-run.
 
-    db = TestSessionLocal()
-    user = User(username="omar", password_hash="hash")
-    db.add(user)
-    db.commit()
-    legacy_token = str(uuid.uuid4())                                   # pre-002 stored the raw uuid4
-    hashed_token = hashlib.sha256(uuid.uuid4().bytes).hexdigest()      # post-002 stores the SHA-256 hash
-    db.add(UserSession(token=legacy_token, user_id=user.id, expires_at=datetime.utcnow()))
-    db.add(UserSession(token=hashed_token, user_id=user.id, expires_at=datetime.utcnow()))
-    db.commit()
-    db.close()
-
-    conn = test_engine.connect()
-    try:
-        assert migration.invalidate_legacy_sessions(conn) == 1
-        remaining = [row[0] for row in conn.execute(text("SELECT token FROM user_sessions")).fetchall()]
-        assert remaining == [hashed_token], "Legacy plaintext token must be invalidated; the hashed one kept"
-
-        # Re-running the invalidation must not log anybody out a second time.
-        assert migration.invalidate_legacy_sessions(conn) == 0
-        assert conn.execute(text("SELECT COUNT(*) FROM user_sessions")).scalar() == 1
-    finally:
-        conn.close()
-
-    # Every user of the database is unaffected: sessions are gone, users are not.
-    db = TestSessionLocal()
-    assert db.query(User).count() == 1
-    db.close()
-
-
-class _FakeResult:
-    def __init__(self, value):
-        self._value = value
-
-    def scalar(self):
-        return self._value
-
-
-class _IntrospectableConn:
-    """Stands in for a live connection: answers only the information_schema probes and
-    the row-existence probes the migration issues, so its control flow can be tested
-    without a Postgres server."""
-
-    def __init__(self, tables=(), columns=(), populated=()):
-        self.tables = set(tables)
-        self.columns = set(columns)
-        self.populated = set(populated)
-
-    def execute(self, statement):
-        sql = " ".join(str(statement).split())
-        if "information_schema.tables" in sql:
-            name = sql.split("table_name = '")[1].split("'")[0]
-            return _FakeResult(name in self.tables)
-        if "information_schema.columns" in sql:
-            name = sql.split("table_name = '")[1].split("'")[0]
-            column = sql.split("column_name = '")[1].split("'")[0]
-            return _FakeResult((name, column) in self.columns)
-        if sql.startswith("SELECT EXISTS (SELECT 1 FROM "):
-            name = sql[len("SELECT EXISTS (SELECT 1 FROM "):].split(")")[0]
-            return _FakeResult(name in self.populated)
-        raise AssertionError(f"Unexpected SQL executed against the stub connection: {sql}")
-
-
-class _RecordingOp:
-    """Records the DDL the migration asks alembic to run, mirroring it onto the stub."""
-
-    def __init__(self, conn):
-        self.conn = conn
-        self.calls = []
-
-    def get_bind(self):
-        return self.conn
-
-    def drop_table(self, name):
-        self.calls.append(("drop_table", name))
-        self.conn.tables.discard(name)
-        self.conn.columns = {c for c in self.conn.columns if c[0] != name}
-        self.conn.populated.discard(name)
-
-    def drop_column(self, table, column):
-        self.calls.append(("drop_column", table, column))
-        self.conn.columns.discard((table, column))
-
-
-ALL_002_TABLES = {"users", "user_sessions", "push_subscriptions"}
-
-
-def test_migration_002_downgrade_drops_schema_and_flags_irreversible_part():
-    """downgrade() drops what 002 created and never hides the part that cannot be reversed"""
-    migration = _migration_002()
-
-    # 1. Fresh database: 002 created the tables and added the columns, so both are undone.
-    conn = _IntrospectableConn(
-        tables=ALL_002_TABLES,
-        columns={("users", "role"), ("users", "is_admin")},
-    )
-    op_stub = _RecordingOp(conn)
-    migration.op = op_stub
-    with pytest.raises(NotImplementedError) as excinfo:
-        migration.downgrade()
-    assert "session" in str(excinfo.value).lower()
-    assert "promote_admin.py" in str(excinfo.value)
-    assert op_stub.calls == [
-        ("drop_column", "users", "role"),
-        ("drop_column", "users", "is_admin"),
-        ("drop_table", "user_sessions"),
-        ("drop_table", "push_subscriptions"),
-        ("drop_table", "users"),
-    ]
-
-    # 2. Partially reversed state: the columns are already gone, so only tables are dropped.
-    conn = _IntrospectableConn(tables=ALL_002_TABLES)
-    op_stub = _RecordingOp(conn)
-    migration.op = op_stub
-    with pytest.raises(NotImplementedError):
-        migration.downgrade()
-    assert op_stub.calls == [
-        ("drop_table", "user_sessions"),
-        ("drop_table", "push_subscriptions"),
-        ("drop_table", "users"),
-    ]
-
-    # 3. Nothing to reverse: still no silent `pass`, and no DDL is attempted.
-    conn = _IntrospectableConn()
-    op_stub = _RecordingOp(conn)
-    migration.op = op_stub
-    with pytest.raises(NotImplementedError):
-        migration.downgrade()
-    assert op_stub.calls == []
-
-
-def test_migration_002_downgrade_never_drops_a_populated_users_table():
-    """A users/user_sessions table that predates 002 must survive the downgrade.
-
-    upgrade() creates those tables only when they are absent, so on a database where
-    the app had already created them (Base.metadata.create_all) they hold the operator's
-    accounts. Dropping them on downgrade would destroy the very users the recovery
-    script exists to restore.
+    Every pre-existing session row must go, including one whose token happens to be 64
+    characters long - the shape of a SHA-256 hash. A length-filtered DELETE would leave
+    such a row behind while the migration still reported success, so the two rows below
+    are chosen to make that failure visible.
     """
     migration = _migration_002()
+    engine = _sqlite_migration_engine(tmp_path, "invalidate.sqlite3")
+    try:
+        _create_pre_002_schema(engine)
 
-    conn = _IntrospectableConn(
-        tables=ALL_002_TABLES,
-        columns={("users", "role"), ("users", "is_admin")},
-        populated={"users", "user_sessions"},       # pre-existing accounts and live sessions
-    )
-    op_stub = _RecordingOp(conn)
-    migration.op = op_stub
-    with pytest.raises(NotImplementedError):
-        migration.downgrade()
+        with engine.connect() as conn:
+            assert migration.invalidate_legacy_sessions(conn) == 2
+            conn.commit()
+            assert conn.execute(text("SELECT COUNT(*) FROM user_sessions")).scalar() == 0
 
-    # The reversible part still happened; the populated tables were kept.
-    assert op_stub.calls == [
-        ("drop_column", "users", "role"),
-        ("drop_column", "users", "is_admin"),
-        ("drop_table", "push_subscriptions"),        # empty -> provably created by 002
-    ]
-    assert conn.tables == {"users", "user_sessions"}
+        # Idempotent: re-running deletes zero rows and cannot log anybody out twice.
+        with engine.connect() as conn:
+            assert migration.invalidate_legacy_sessions(conn) == 0
+            conn.commit()
+            assert conn.execute(text("SELECT COUNT(*) FROM user_sessions")).scalar() == 0
+
+        # The users are untouched - only the sessions are gone.
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT COUNT(*) FROM users")).scalar() == 1
+    finally:
+        engine.dispose()
+
+
+def test_migration_002_schema_probes_resolve_through_the_connection(tmp_path):
+    """table_exists / column_exists must answer from the connection's own schema.
+
+    These probes guard the upgrade() critical path: if column_exists() wrongly reports
+    True for a column that is not there, upgrade() prints "users table already exists"
+    and silently never adds role/is_admin, which is unrecoverable.
+    """
+    migration = _migration_002()
+    engine = _sqlite_migration_engine(tmp_path, "probes.sqlite3")
+    try:
+        _create_pre_002_schema(engine)
+        with engine.connect() as conn:
+            assert migration.table_exists(conn, "users") is True
+            assert migration.table_exists(conn, "user_sessions") is True
+            assert migration.table_exists(conn, "no_such_table") is False
+            # The pre-002 users table has neither column, and both probes must agree.
+            assert migration.column_exists(conn, "users", "role") is False
+            assert migration.column_exists(conn, "users", "is_admin") is False
+            assert migration.column_exists(conn, "users", "username") is True
+            # A column on a table that does not exist is False, not an error.
+            assert migration.column_exists(conn, "no_such_table", "role") is False
+    finally:
+        engine.dispose()
+
+
+def _run_downgrade_on_real_sqlite(tmp_path, name="downgrade.sqlite3"):
+    """Run migration 002's downgrade() under the real alembic machinery.
+
+    No stub and no recorded op calls: a real MigrationContext is configured against a
+    real SQLite engine and real alembic Operations are installed, so op.drop_column
+    executes actual ALTER TABLE DDL. Whatever downgrade() does is what the database ends
+    up with.
+    """
+    migration = _migration_002()
+    engine = _sqlite_migration_engine(tmp_path, name)
+    _create_pre_002_schema(engine)
+    # Put users into the post-002 state: role / is_admin added.
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE users ADD COLUMN role VARCHAR NOT NULL DEFAULT 'user'"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0"))
+
+    tables_before = _table_names(engine)
+    with engine.begin() as conn:
+        context = MigrationContext.configure(conn)
+        with Operations.context(context):
+            # downgrade() must return normally instead of raising: alembic runs a
+            # migration inside a transaction, so a raise after the DDL would roll the
+            # drops back and leave the operator believing the reversal happened.
+            assert migration.downgrade() is None
+
+    return engine, tables_before
+
+
+def test_migration_002_downgrade_drops_only_the_columns_and_keeps_the_tables(tmp_path):
+    """downgrade() reverses the columns and returns, leaving the three tables intact."""
+    engine, tables_before = _run_downgrade_on_real_sqlite(tmp_path)
+    try:
+        # The columns this revision added are gone from the real schema.
+        assert _column_names(engine, "users") == ["id", "username", "password_hash"]
+        # The tables survive - they may predate revision 002 (Base.metadata.create_all).
+        assert _table_names(engine) == tables_before
+        assert "user_sessions" in tables_before and "push_subscriptions" in tables_before
+    finally:
+        engine.dispose()
+
+
+def test_migration_002_downgrade_is_safe_to_re_run(tmp_path):
+    """Re-running downgrade() is a no-op: nothing raised, nothing further dropped."""
+    migration = _migration_002()
+    engine = _sqlite_migration_engine(tmp_path, "downgrade_rerun.sqlite3")
+    try:
+        _create_pre_002_schema(engine)
+        # users still has role / is_admin, so the first run has real work to do.
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE users ADD COLUMN role VARCHAR NOT NULL DEFAULT 'user'"))
+            conn.execute(text("ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0"))
+
+        tables_before = _table_names(engine)
+
+        for run in ("first", "second"):
+            with engine.begin() as conn:
+                context = MigrationContext.configure(conn)
+                with Operations.context(context):
+                    assert migration.downgrade() is None
+            assert _column_names(engine, "users") == ["id", "username", "password_hash"], run
+            assert _table_names(engine) == tables_before, run
+    finally:
+        engine.dispose()
+
+
+def test_migration_002_downgrade_leaves_a_database_without_users_alone(tmp_path):
+    """A database with no users table is not an error and produces no DDL."""
+    migration = _migration_002()
+    engine = _sqlite_migration_engine(tmp_path, "downgrade_empty.sqlite3")
+    try:
+        with engine.begin() as conn:
+            context = MigrationContext.configure(conn)
+            with Operations.context(context):
+                assert migration.downgrade() is None
+        assert _table_names(engine) == []
+    finally:
+        engine.dispose()
 
 
 

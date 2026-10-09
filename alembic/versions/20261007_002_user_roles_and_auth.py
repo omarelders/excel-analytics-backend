@@ -17,66 +17,68 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 # user_sessions.token used to store the raw session token (str(uuid.uuid4()) -> 36
-# characters). The application now stores the SHA-256 hex digest of that token
-# (hashlib.sha256(token).hexdigest() -> 64 characters). See routers/auth.py
-# (login/logout) and dependencies.get_current_user, which hash before lookup.
+# characters). It now stores the SHA-256 hex digest of that token
+# (hashlib.sha256(token).hexdigest() -> 64 characters), which is why the column is
+# declared String(64) below. See routers/auth.py (login/logout) and
+# dependencies.get_current_user, which hash before lookup.
 SESSION_TOKEN_HASH_LENGTH = 64
+
+TABLES_CREATED_BY_THIS_REVISION = ("users", "user_sessions", "push_subscriptions")
 
 
 def table_exists(conn, table_name):
-    """Check if a table exists in the database"""
-    result = conn.execute(text(
-        f"SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = '{table_name}')"
-    ))
-    return result.scalar()
+    """Check if a table exists in the database.
+
+    Uses the SQLAlchemy inspector rather than a raw information_schema query.
+    information_schema is namespace-global, so querying it with no table_schema
+    filter also sees same-named tables in other schemas: on a database whose
+    search_path is not 'public', a foreign 'users' would make this report True and
+    upgrade() would silently skip adding role/is_admin while printing
+    "users table already exists". The inspector resolves through the connection's
+    own current schema, so it only ever sees what this connection can see.
+    """
+    return bool(inspect(conn).has_table(table_name))
 
 
 def column_exists(conn, table_name, column_name):
-    """Check if a column exists in a table"""
-    result = conn.execute(text(f"""
-        SELECT EXISTS (
-            SELECT 1 FROM information_schema.columns 
-            WHERE table_name = '{table_name}' AND column_name = '{column_name}'
-        )
-    """))
-    return result.scalar()
+    """Check if a column exists in a table.
+
+    False when the table does not exist at all, so callers can check a table and its
+    column independently without the inspector raising.
+    """
+    if not inspect(conn).has_table(table_name):
+        return False
+    return any(column["name"] == column_name for column in inspect(conn).get_columns(table_name))
 
 
 def invalidate_legacy_sessions(conn):
-    """Delete the session rows written by the pre-SHA-256 auth code.
+    """Delete every session row that predates this revision. One-time, unconditional.
 
-    Returns the number of rows deleted (0 when there is nothing to do).
+    user_sessions.token changes here from a plaintext uuid4 session token to the
+    SHA-256 hash of that token, so every row written before this revision can no
+    longer be matched by dependencies.get_current_user and is dead data. Deleting it
+    explicitly - rather than leaving it to rot - is what logs every user out ONCE:
+    users log in again (passwords are untouched), and lost admins are recovered with
+    'python scripts/promote_admin.py <username>'.
 
-    Idempotency: only rows holding a pre-hash token (length != 64) are deleted.
-    After the first run every remaining row is a SHA-256 hash, so a re-run
-    deletes zero rows and cannot log anybody out a second time.
+    The DELETE is deliberately unconditional. Idempotency is free - after the first
+    run the table is empty, so a re-run deletes zero rows - whereas filtering on
+    token shape would leave any legacy plaintext token that happens to be 64
+    characters long behind as a dead row while the migration still reported success.
     """
     if not inspect(conn).has_table("user_sessions"):
         print("[MIGRATION] user_sessions table does not exist - no sessions to invalidate")
         return 0
 
-    result = conn.execute(text(
-        "DELETE FROM user_sessions WHERE length(token) <> :hash_length"
-    ), {"hash_length": SESSION_TOKEN_HASH_LENGTH})
+    result = conn.execute(text("DELETE FROM user_sessions"))
     deleted = result.rowcount or 0
     print(
-        f"[MIGRATION] Invalidated {deleted} pre-existing session row(s) - token is now a SHA-256 hash, "
-        "so every user is logged out ONCE and simply logs in again (passwords are untouched)."
+        f"[MIGRATION] Invalidated {deleted} pre-existing session row(s). "
+        "user_sessions.token changed from a plaintext uuid4 session token to the SHA-256 hash "
+        "of that token, so every user is logged out ONCE and simply logs in again "
+        "(passwords are untouched)."
     )
     return deleted
-
-
-def table_is_empty(conn, table_name):
-    """True when the table holds no rows at all.
-
-    upgrade() creates users / user_sessions / push_subscriptions only when they are
-    absent, so on a database where the app had already created them out-of-band
-    (Base.metadata.create_all) revision 002 merely added columns to an existing,
-    populated table. An empty table is therefore the only safe signal that this
-    revision created the table itself and may drop it again on downgrade.
-    """
-    result = conn.execute(text(f"SELECT EXISTS (SELECT 1 FROM {table_name})"))
-    return not result.scalar()
 
 
 def upgrade() -> None:
@@ -109,7 +111,7 @@ def upgrade() -> None:
     if not table_exists(conn, 'user_sessions'):
         op.create_table(
             'user_sessions',
-            sa.Column('token', sa.String(length=64), nullable=False),
+            sa.Column('token', sa.String(length=SESSION_TOKEN_HASH_LENGTH), nullable=False),
             sa.Column('user_id', sa.Integer(), nullable=False),
             sa.Column('created_at', sa.DateTime(), nullable=True),
             sa.Column('expires_at', sa.DateTime(), nullable=False),
@@ -150,44 +152,51 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Reverse 002: undo the role/is_admin columns and the tables this revision created."""
+    """Reverse 002: drop the role / is_admin columns this revision added.
+
+    This function returns normally instead of raising, because raising would be worse
+    than useless in both directions:
+
+    * On a transactional-DDL backend such as Postgres, alembic runs the migration inside
+      a transaction, so an exception now would roll the column drops below back - the
+      operator is told the reversal succeeded while the schema is untouched.
+    * On SQLite the driver auto-commits DDL, so the drops would already be applied
+      before the raise fires.
+
+    Either way an exception here misleads the operator about what actually happened, so
+    the genuinely irreversible parts of this revision are recorded in this docstring
+    rather than simulated with a rolled-back exception:
+
+    * The pre-existing user_sessions rows deleted by invalidate_legacy_sessions() in
+      upgrade() cannot be restored - they are gone from the moment 002 ran, and
+      re-running upgrade() will not bring them back.
+    * The role / is_admin values dropped below cannot be restored: after this
+      downgrade nobody can tell any more who was an admin. Re-grant admin with
+      'python scripts/promote_admin.py <username>'.
+
+    The three tables are left in place on purpose. upgrade() creates each of them only
+    when it is absent, so any of them may have existed long before this revision - the
+    application also creates the schema through Base.metadata.create_all(). Dropping a
+    table here would be silent data loss for exactly the accounts this revision's
+    recovery script exists to restore. An operator who really wants one gone must drop
+    it by hand, knowing what it holds.
+    """
     conn = op.get_bind()
 
-    # 1. Undo the column additions (dropping users below would remove them anyway).
-    if table_exists(conn, "users"):
-        if column_exists(conn, "users", "role"):
-            op.drop_column("users", "role")
-            print("[MIGRATION] Dropped role column from users")
-        if column_exists(conn, "users", "is_admin"):
-            op.drop_column("users", "is_admin")
-            print("[MIGRATION] Dropped is_admin column from users")
+    if not table_exists(conn, "users"):
+        print("[MIGRATION] users table does not exist - nothing to reverse")
+        return
 
-    # 2. Undo the table creation, but only for tables this revision provably created.
-    #    A populated users/user_sessions table predates 002 (the app creates tables via
-    #    Base.metadata.create_all as well), and dropping it on downgrade would destroy
-    #    the very accounts the recovery script exists to restore - so it is kept.
-    for table_name in ("user_sessions", "push_subscriptions", "users"):
-        if not table_exists(conn, table_name):
-            print(f"[MIGRATION] {table_name} table already absent")
-            continue
-        if not table_is_empty(conn, table_name):
-            print(
-                f"[MIGRATION] {table_name} table is NOT empty - left in place (dropping it "
-                f"would delete rows that predate revision 002). Drop it by hand if you are sure."
-            )
-            continue
-        op.drop_table(table_name)
-        print(f"[MIGRATION] Dropped {table_name} table")
+    for column_name in ("role", "is_admin"):
+        if column_exists(conn, "users", column_name):
+            op.drop_column("users", column_name)
+            print(f"[MIGRATION] Dropped {column_name} column from users")
+        else:
+            print(f"[MIGRATION] users.{column_name} column already absent")
 
-    # 3. The reversal is deliberately incomplete, and the operator is told exactly why:
-    #    the pre-existing session rows deleted by upgrade() cannot be restored, and the
-    #    role/is_admin columns are gone, so nobody can tell any more who was an admin.
-    raise NotImplementedError(
-        "002_user_roles_and_auth cannot be fully downgraded. What was reversed: the "
-        "role/is_admin columns, and any of users/user_sessions/push_subscriptions that "
-        "002 itself created (left empty by this downgrade). What cannot be reversed: the "
-        "pre-existing user_sessions rows deleted during upgrade(), which are unrecoverable, "
-        "and the removed role/is_admin values - after downgrading, re-grant admin with "
-        "'python scripts/promote_admin.py <username>'. Populated tables were kept on "
-        "purpose because they predate this revision; drop them by hand if you are sure."
-    )
+    for table_name in TABLES_CREATED_BY_THIS_REVISION:
+        print(
+            f"[MIGRATION] Table {table_name} left in place - it may predate revision 002 "
+            "(the app also creates it via Base.metadata.create_all). Drop it by hand if that "
+            "is intended."
+        )

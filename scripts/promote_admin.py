@@ -13,8 +13,11 @@ Usage:
     python scripts/promote_admin.py <username>   # grant admin to an existing user
     python scripts/promote_admin.py --list        # list all users with their role
 
-Exit codes: 0 = success (including "already admin"), 1 = user not found / DB error,
-2 = bad usage.
+Exit codes:
+    0 = success (including "already admin")
+    1 = the username does not exist
+    2 = bad usage
+    3 = environment or schema error (unreachable database, missing users table, ...)
 """
 import argparse
 import os
@@ -32,16 +35,40 @@ from database import SessionLocal, User  # noqa: E402  (import needs the path fi
 ADMIN_ROLE = "admin"
 LIST_HINT = "python scripts/promote_admin.py --list"
 
+EXIT_OK = 0
+EXIT_USER_NOT_FOUND = 1
+EXIT_USAGE = 2
+EXIT_ENVIRONMENT = 3
+
+SCHEMA_HINT = (
+    "[HINT] Is the database reachable and has the schema been created? Check DATABASE_URL, "
+    "then run 'python run_migrations.py' (or 'alembic upgrade head')."
+)
+
 
 class UserNotFoundError(Exception):
     """Raised when the requested username does not exist in the database."""
 
 
+def report_environment_error(action: str, exc: Exception) -> int:
+    """Print an environment/schema failure and return the matching exit code.
+
+    An unreachable database, a missing users table and a permission failure are
+    different problems, and none of them means "that user does not exist", so they get
+    their own exit code and the schema hint instead of being folded into a generic
+    "could not promote" line.
+    """
+    print(f"[ERROR] {action}: {exc}")
+    print(SCHEMA_HINT)
+    return EXIT_ENVIRONMENT
+
+
 def promote_user(db, username: str) -> str:
     """Grant admin to an existing user and return the operator-facing message.
 
-    Idempotent: promoting a user who is already an admin succeeds with a "nothing
-    changed" message. The password hash is never touched.
+    Idempotent: a user who is already an admin is a no-op success - checked before any
+    write, so a re-run neither touches the row nor opens a transaction. The password
+    hash is never touched.
     """
     user = db.query(User).filter(User.username == username).first()
     if user is None:
@@ -49,17 +76,16 @@ def promote_user(db, username: str) -> str:
             f"User '{username}' does not exist. Run '{LIST_HINT}' to see the available usernames."
         )
 
-    already_admin = bool(getattr(user, "is_admin", False)) or getattr(user, "role", "user") == ADMIN_ROLE
+    if bool(getattr(user, "is_admin", False)) or getattr(user, "role", "user") == ADMIN_ROLE:
+        return (
+            f"[INFO] user '{username}' is already admin "
+            f"(role='{ADMIN_ROLE}', is_admin=true) - nothing changed."
+        )
 
     user.role = ADMIN_ROLE
     user.is_admin = True
     db.commit()
 
-    if already_admin:
-        return (
-            f"[INFO] user '{username}' is already admin "
-            f"(role='{ADMIN_ROLE}', is_admin=true) - nothing changed."
-        )
     return (
         f"[SUCCESS] user '{username}' is now admin "
         f"(equivalent SQL: UPDATE users SET role='{ADMIN_ROLE}', is_admin=TRUE "
@@ -101,16 +127,14 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     if args.list:
-        db = SessionLocal()
+        try:
+            db = SessionLocal()
+        except Exception as exc:  # unbound engine, bad URL...
+            return report_environment_error("Could not connect to the database", exc)
         try:
             users = list_users(db)
-        except Exception as exc:  # keep operator-facing output free of tracebacks
-            print(
-                f"[ERROR] Could not list users: {exc}\n"
-                "[HINT] Has the schema been created? Check DATABASE_URL, then run "
-                "'python run_migrations.py' (or 'alembic upgrade head')."
-            )
-            return 1
+        except Exception as exc:  # missing users table, no permission...
+            return report_environment_error("Could not list users", exc)
         finally:
             db.close()
         if not users:
@@ -120,7 +144,7 @@ def main(argv=None) -> int:
             )
         else:
             print(format_users(users))
-        return 0
+        return EXIT_OK
 
     if not args.username:
         parser.error(
@@ -128,20 +152,24 @@ def main(argv=None) -> int:
             "(or use --list to see the existing usernames)"
         )
 
-    db = SessionLocal()
+    # Session construction is inside the try on purpose: if SessionLocal() itself
+    # raises (unbound engine, bad DATABASE_URL) the operator must get an exit code and
+    # a hint, not a traceback.
+    db = None
     try:
+        db = SessionLocal()
         message = promote_user(db, args.username)
     except UserNotFoundError as exc:
         print(f"[ERROR] {exc}")
-        return 1
+        return EXIT_USER_NOT_FOUND
     except Exception as exc:  # keep operator-facing output free of tracebacks
-        print(f"[ERROR] Could not promote '{args.username}': {exc}")
-        return 1
+        return report_environment_error(f"Could not promote '{args.username}'", exc)
     finally:
-        db.close()
+        if db is not None:
+            db.close()
 
     print(message)
-    return 0
+    return EXIT_OK
 
 
 if __name__ == "__main__":
