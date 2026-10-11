@@ -33,3 +33,8 @@ uvicorn main:app --reload
 ```
 
 The API will be available at `http://localhost:8000`.
+
+## Deployment
+
+See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the required config vars, the
+release-phase caveats, and the migration notes.
