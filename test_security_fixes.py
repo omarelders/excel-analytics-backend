@@ -1640,6 +1640,168 @@ def test_migration_002_downgrade_leaves_a_database_without_users_alone(tmp_path)
         engine.dispose()
 
 
+def _run_upgrade_on_real_sqlite(tmp_path, name="upgrade.sqlite3"):
+    """Run migration 002's upgrade() under the real alembic machinery.
+
+    The mirror of _run_downgrade_on_real_sqlite: a real MigrationContext is
+    configured against a real SQLite engine and real alembic Operations are
+    installed, so op.create_table / op.add_column execute actual ALTER TABLE DDL
+    and invalidate_legacy_sessions' DELETE really runs. Whatever upgrade() does
+    is what the database ends up with.
+
+    upgrade() itself needs this treatment because its helpers are also invoked
+    directly by other tests in this file - testing them alone leaves the call
+    inside upgrade() uncovered, and a deleted call there is invisible.
+    """
+    migration = _migration_002()
+    engine = _sqlite_migration_engine(tmp_path, name)
+    _create_pre_002_schema(engine)
+    with engine.begin() as conn:
+        context = MigrationContext.configure(conn)
+        with Operations.context(context):
+            migration.upgrade()
+    return engine
+
+
+def test_migration_002_upgrade_adds_the_role_columns_and_invalidates_every_session(tmp_path, capsys):
+    """Through upgrade(): a pre-002 users table gains role / is_admin and every session goes.
+
+    The plan's acceptance criteria, driven the way the operator's deploy drives
+    them. Deleting the invalidate_legacy_sessions(conn) call from upgrade() must
+    fail this test - the schema assertions below are what that call is the only
+    thing that can satisfy.
+    """
+    engine = _run_upgrade_on_real_sqlite(tmp_path)
+    try:
+        assert _column_names(engine, "users") == ["id", "username", "password_hash", "role", "is_admin"]
+
+        # The defaults are real: a user created after the migration gets the same
+        # non-privileged values as the one that already existed.
+        with engine.begin() as conn:
+            conn.execute(text("INSERT INTO users (id, username, password_hash) VALUES (2, 'laila', 'hash')"))
+        with engine.connect() as conn:
+            rows = [tuple(row) for row in conn.execute(text("SELECT role, is_admin FROM users ORDER BY id"))]
+        assert rows == [("user", 0), ("user", 0)]
+
+        # The pre-existing session rows are gone - they hold a plaintext uuid4
+        # token that get_current_user can no longer match - and upgrade() says so.
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT COUNT(*) FROM user_sessions")).scalar() == 0
+        assert "Invalidated 2 pre-existing session row(s)" in capsys.readouterr().out
+
+        # Only the sessions went: the users and the rest of the schema survive.
+        assert _table_names(engine) == ["push_subscriptions", "user_sessions", "users"]
+    finally:
+        engine.dispose()
+
+
+def test_migration_002_upgrade_is_safe_to_re_run(tmp_path, capsys):
+    """A second upgrade() adds no columns and invalidates nothing.
+
+    The plan's idempotency criterion. The schema assertions catch a duplicated
+    add_column; the reported count is the only observable that shows the second
+    DELETE found an empty table instead of deleting a user's live session.
+    """
+    engine = _run_upgrade_on_real_sqlite(tmp_path, "upgrade_rerun.sqlite3")
+    try:
+        columns_after_first_run = _column_names(engine, "users")
+        tables_after_first_run = _table_names(engine)
+        capsys.readouterr()
+
+        with engine.begin() as conn:
+            context = MigrationContext.configure(conn)
+            with Operations.context(context):
+                _migration_002().upgrade()
+
+        assert _column_names(engine, "users") == columns_after_first_run
+        assert _table_names(engine) == tables_after_first_run
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT COUNT(*) FROM users")).scalar() == 1
+            assert conn.execute(text("SELECT COUNT(*) FROM user_sessions")).scalar() == 0
+        assert "Invalidated 0 pre-existing session row(s)" in capsys.readouterr().out
+    finally:
+        engine.dispose()
+
+
+def _migration_001():
+    return _load_module(
+        "migration_001_under_test",
+        os.path.join("alembic", "versions", "20260204_001_baseline_initial_tables.py"),
+    )
+
+
+def _run_baseline_upgrade_on_real_sqlite(tmp_path, name="baseline.sqlite3"):
+    """Run migration 001's upgrade() under the real alembic machinery.
+
+    001 is the revision that runs first on the live database, so its probes must
+    answer from that connection. Running it here is also the regression test for
+    them: SQLite has no information_schema, so restoring the raw query fails
+    loudly instead of quietly answering from a schema this connection never sees.
+    """
+    engine = _sqlite_migration_engine(tmp_path, name)
+    with engine.begin() as conn:
+        context = MigrationContext.configure(conn)
+        with Operations.context(context):
+            _migration_001().upgrade()
+    return engine
+
+
+def test_migration_001_baseline_creates_the_schema_and_reruns_cleanly(tmp_path):
+    """001 creates the whole baseline exactly once, and re-running changes nothing."""
+    engine = _run_baseline_upgrade_on_real_sqlite(tmp_path)
+    try:
+        tables = _table_names(engine)
+        assert tables == [
+            "content_items",
+            "notes",
+            "payment_files",
+            "payment_records",
+            "shipments",
+            "uploaded_files",
+        ]
+        # 001 predates auth: the users table is revision 002's to create.
+        assert "users" not in tables
+
+        with engine.begin() as conn:
+            context = MigrationContext.configure(conn)
+            with Operations.context(context):
+                _migration_001().upgrade()
+
+        assert _table_names(engine) == tables
+        # A duplicated add_column is the failure mode a re-run could produce.
+        names = _column_names(engine, "shipments")
+        for column in ("is_deleted", "deleted_at", "نوع السعر"):
+            assert names.count(column) == 1
+    finally:
+        engine.dispose()
+
+
+def test_migration_001_baseline_adds_only_the_missing_columns_to_an_existing_table(tmp_path):
+    """The "already exists" branch: the probes decide what gets ALTERed.
+
+    shipments created with nothing but an id is a database that predates the
+    soft-delete columns - the state the probes exist to recognise. upgrade() must
+    add exactly the three missing columns and leave the table's own id alone.
+    """
+    engine = _sqlite_migration_engine(tmp_path, "baseline_partial.sqlite3")
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("CREATE TABLE shipments (id INTEGER PRIMARY KEY)"))
+
+        with engine.begin() as conn:
+            context = MigrationContext.configure(conn)
+            with Operations.context(context):
+                _migration_001().upgrade()
+
+        names = _column_names(engine, "shipments")
+        assert names[0] == "id"
+        for column in ("is_deleted", "deleted_at", "نوع السعر"):
+            assert names.count(column) == 1
+        assert "uploaded_files" in _table_names(engine)
+    finally:
+        engine.dispose()
+
+
 # ============================================================================
 # Task 2 — the rate limiter must key on the real client, not the proxy
 # ============================================================================

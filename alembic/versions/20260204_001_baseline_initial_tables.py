@@ -11,7 +11,7 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy import text
+from sqlalchemy import inspect
 
 # revision identifiers, used by Alembic.
 revision: str = '001_baseline'
@@ -21,22 +21,30 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def table_exists(conn, table_name):
-    """Check if a table exists in the database"""
-    result = conn.execute(text(
-        f"SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = '{table_name}')"
-    ))
-    return result.scalar()
+    """Check if a table exists in the database.
+
+    Uses the SQLAlchemy inspector rather than a raw information_schema query.
+    information_schema is namespace-global, so querying it with no table_schema
+    filter also sees same-named tables in other schemas: on a database whose
+    search_path is not 'public', a foreign 'shipments' would make this report
+    True and upgrade() would silently skip creating the real one while printing
+    "shipments table already exists". The inspector resolves through the
+    connection's own current schema, so it only ever sees what this connection
+    can see - and this is the first revision that runs on the live database, so
+    a wrong answer here is wrong for everything after it too.
+    """
+    return bool(inspect(conn).has_table(table_name))
 
 
 def column_exists(conn, table_name, column_name):
-    """Check if a column exists in a table"""
-    result = conn.execute(text(f"""
-        SELECT EXISTS (
-            SELECT 1 FROM information_schema.columns 
-            WHERE table_name = '{table_name}' AND column_name = '{column_name}'
-        )
-    """))
-    return result.scalar()
+    """Check if a column exists in a table.
+
+    False when the table does not exist at all, so callers can check a table and
+    its columns independently without the inspector raising.
+    """
+    if not inspect(conn).has_table(table_name):
+        return False
+    return any(column["name"] == column_name for column in inspect(conn).get_columns(table_name))
 
 
 def upgrade() -> None:
