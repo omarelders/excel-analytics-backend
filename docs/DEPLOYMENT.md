@@ -3,17 +3,28 @@
 Operational facts that are not visible from the code or the deploy output. Read
 this before the first deploy of the security-remediation branch.
 
-## Required config var: `TRUSTED_PROXY_COUNT=1`
+## Required config var: `TRUSTED_PROXY_COUNT=2`
 
 Set it **before** the web dyno boots:
 
 ```bash
-heroku config:set TRUSTED_PROXY_COUNT=1
+heroku config:set TRUSTED_PROXY_COUNT=2
 ```
 
-Heroku routes through one proxy, and the app refuses to start in production with
-the hop count undeclared (`main.py` raises at import time, naming the variable).
-Without the var the web dyno crash-loops with the app fully down.
+The production path is **two** appending proxies, not one: the Vercel edge that
+rewrites the same-origin request onto Heroku, then Heroku's router. The app
+refuses to start in production with the hop count undeclared (`main.py` raises
+at import time, naming the variable). Without the var the web dyno crash-loops
+with the app fully down.
+
+The value matters as much as its presence. The rate limiter keys each bucket on
+the entry the trusted chain observed as the client: with `TRUSTED_PROXY_COUNT=1`
+the code reads the last X-Forwarded-For entry, which is the **Vercel edge IP**,
+not the user's — every visitor shares a handful of edge addresses, so the
+5/minute login and upload limits become effectively global and real users hit
+429s. With `2` the key is the client IP Vercel forwarded, which is what the
+limits were written for. Use `1` only if clients ever reach Heroku's router
+directly, bypassing the Vercel rewrites.
 
 **The release phase will not tell you.** The `release:` phase runs
 `python run_migrations.py`, which never imports `main`, so the startup guard never

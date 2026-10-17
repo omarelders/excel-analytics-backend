@@ -89,6 +89,14 @@ def _is_loopback_ip(host: str) -> bool:
         except OSError:
             return False
 
+    # An IPv4-mapped IPv6 literal ("::ffff:127.0.0.1") names the IPv4 address it
+    # embeds, but is_loopback/is_unspecified on the IPv6 object only sees ::1 and
+    # "::" - the mapped form would read as a normal global address and reach the
+    # production allow-list. Unwrap it and judge the IPv4 inside.
+    mapped = getattr(address, "ipv4_mapped", None)
+    if mapped is not None:
+        address = mapped
+
     # 0.0.0.0 is "unspecified" rather than loopback, but it names this host's
     # own interfaces, so it is no more usable in a production allow-list.
     return address.is_loopback or address.is_unspecified
