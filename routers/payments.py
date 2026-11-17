@@ -217,7 +217,7 @@ def get_payment_file_data(
 async def upload_payment_file(request: Request, file: UploadFile = File(...)):
     """Upload and parse a payment Excel file"""
     from database import SessionLocal, PaymentFile, PaymentRecord
-    from datetime import datetime
+    import crud
     
     print(f"\n{'='*50}")
     filename = file.filename or ""
@@ -274,7 +274,8 @@ async def upload_payment_file(request: Request, file: UploadFile = File(...)):
     # 4. Parse Excel
     print("Step 4: Parsing Excel file...")
     try:
-        df = pd.read_excel(file_path)
+        df = pd.read_excel(file_path, engine="openpyxl")
+        df.columns = [crud._normalize_header(c) for c in df.columns]
         print(f"[INFO] Excel parsed: {len(df)} rows, {len(df.columns)} columns")
         print(f"   Columns: {list(df.columns)[:5]}... (showing first 5)")
     except Exception as e:
@@ -290,18 +291,8 @@ async def upload_payment_file(request: Request, file: UploadFile = File(...)):
     print("Step 5: Saving to database...")
     db = SessionLocal()
     try:
-        # Create payment file record
-        print("   Creating PaymentFile record...")
-        payment_file = PaymentFile(
-            filename=file.filename,
-            record_count=len(df)
-        )
-        db.add(payment_file)
-        db.flush()
-        print(f"✅ PaymentFile created with ID: {payment_file.id}")
-        
         # Column mapping (Arabic to model attribute) - ALL 48 columns
-        column_map = {
+        raw_column_map = {
             "المستحق": "amount_due",
             "الكود": "code",
             "التاريخ": "date",
@@ -351,9 +342,30 @@ async def upload_payment_file(request: Request, file: UploadFile = File(...)):
             "تاريخ أخر حركة": "last_movement_date",
             "سداد مستحقات العملاء": "client_dues_payment"
         }
+        column_map = {crud._normalize_header(k): v for k, v in raw_column_map.items()}
+        matched_columns = [col for col in column_map if col in df.columns]
+
+        if len(df) == 0 or not matched_columns:
+            db.rollback()
+            raise HTTPException(status_code=400, detail="Excel file contains no valid payment records")
+
+        # Create payment file record
+        print("   Creating PaymentFile record...")
+        payment_file = PaymentFile(
+            filename=file.filename,
+            record_count=len(df)
+        )
+        db.add(payment_file)
+        db.flush()
+        print(f"✅ PaymentFile created with ID: {payment_file.id}")
         
-        # Date columns that need special handling
+        # Typed columns that need special handling
         date_columns = {"date", "delivery_cancel_date", "delivery_date", "last_movement_date"}
+        float_columns = {
+            "amount_due", "weight", "package_value", "fees", "net_package_price",
+            "total_value", "delivery_value", "collected_fees", "due_fees", "return_value"
+        }
+        int_columns = {"pieces_count", "attempts_count"}
         
         # Insert records
         print(f"   Inserting {len(df)} records...")
@@ -364,22 +376,14 @@ async def upload_payment_file(request: Request, file: UploadFile = File(...)):
                 if arabic_col in df.columns:
                     value = row[arabic_col]
                     
-                    # Handle NaN values
-                    if pd.isna(value):
-                        value = None
-                    # Handle date columns - convert to None if not a valid date
-                    elif attr_name in date_columns and value is not None:
-                        try:
-                            if isinstance(value, str):
-                                # Try to parse string date
-                                value = pd.to_datetime(value)
-                            elif not isinstance(value, (datetime, pd.Timestamp)):
-                                value = None
-                        except:
-                            value = None
-                    # Convert numpy types to Python types
-                    elif hasattr(value, 'item'):
-                        value = value.item()
+                    if attr_name in date_columns:
+                        value = crud.parse_date(value)
+                    elif attr_name in float_columns:
+                        value = crud.clean_float(value)
+                    elif attr_name in int_columns:
+                        value = crud.clean_int(value)
+                    else:
+                        value = crud.clean_str(value)
                     
                     record_data[attr_name] = value
             
@@ -406,7 +410,9 @@ async def upload_payment_file(request: Request, file: UploadFile = File(...)):
             "file_id": payment_file.id,
             "rows_inserted": len(df)
         }
-        
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception as e:
         if os.path.exists(file_path):
             try:

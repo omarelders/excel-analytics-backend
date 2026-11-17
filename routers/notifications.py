@@ -6,7 +6,7 @@ import json
 import base64
 
 from database import PushSubscription
-from push_config import get_vapid_keys, send_push_notification
+from push_config import get_vapid_keys, get_vapid_public_key_base64url, send_push_notification
 from dependencies import get_current_user, require_admin, limiter
 
 router = APIRouter(
@@ -26,9 +26,13 @@ def get_db():
     finally:
         db.close()
 
+class SubscriptionKeys(BaseModel):
+    p256dh: str = Field(..., min_length=1, max_length=512)
+    auth: str = Field(..., min_length=1, max_length=512)
+
 class SubscriptionSchema(BaseModel):
     endpoint: str = Field(..., min_length=1, max_length=2048)
-    keys: dict
+    keys: SubscriptionKeys
 
 class NotificationSchema(BaseModel):
     title: str = Field(..., min_length=1, max_length=255)
@@ -68,38 +72,43 @@ def get_vapid_public_key():
     if not keys:
         raise HTTPException(status_code=500, detail="VAPID keys not configured")
     
-    # The browser expects the public key as a Uint8Array. 
-    # Usually this is the raw 65-byte uncompressed point, Base64URL encoded.
-    # Our push_config saved the PEM format. We will extract the base64 part.
-    public_key_pem = keys["publicKey"]
-    # Strip headers and newlines
-    public_key_base64 = public_key_pem.replace("-----BEGIN PUBLIC KEY-----", "") \
-                                     .replace("-----END PUBLIC KEY-----", "") \
-                                     .replace("\n", "").strip()
+    try:
+        public_key_base64 = get_vapid_public_key_base64url(keys["publicKey"])
+    except Exception:
+        raise HTTPException(status_code=500, detail="Invalid VAPID public key configuration")
     
     return {"publicKey": public_key_base64}
 
 @router.post("/subscribe")
 def subscribe(subscription: SubscriptionSchema, db: Session = Depends(get_db)):
-    # Check if already exists
-    existing = db.query(PushSubscription).filter(PushSubscription.endpoint == subscription.endpoint).first()
-    if existing:
-        return {"message": "Already subscribed"}
+    try:
+        existing = db.query(PushSubscription).filter(PushSubscription.endpoint == subscription.endpoint).first()
+        if existing:
+            return {"message": "Already subscribed"}
 
-    new_sub = PushSubscription(
-        endpoint=subscription.endpoint,
-        p256dh=subscription.keys.get("p256dh"),
-        auth=subscription.keys.get("auth")
-    )
-    db.add(new_sub)
-    db.commit()
-    return {"message": "Subscribed successfully"}
+        new_sub = PushSubscription(
+            endpoint=subscription.endpoint,
+            p256dh=subscription.keys.p256dh,
+            auth=subscription.keys.auth
+        )
+        db.add(new_sub)
+        db.commit()
+        return {"message": "Subscribed successfully"}
+    except Exception as e:
+        db.rollback()
+        print(f"Error subscribing to push notifications: {e}")
+        raise HTTPException(status_code=500, detail="Failed to subscribe")
 
 @router.post("/unsubscribe")
 def unsubscribe(subscription: SubscriptionSchema, db: Session = Depends(get_db)):
-    db.query(PushSubscription).filter(PushSubscription.endpoint == subscription.endpoint).delete()
-    db.commit()
-    return {"message": "Unsubscribed successfully"}
+    try:
+        db.query(PushSubscription).filter(PushSubscription.endpoint == subscription.endpoint).delete()
+        db.commit()
+        return {"message": "Unsubscribed successfully"}
+    except Exception as e:
+        db.rollback()
+        print(f"Error unsubscribing from push notifications: {e}")
+        raise HTTPException(status_code=500, detail="Failed to unsubscribe")
 
 @router.post("/send")
 @limiter.limit("1/minute")
@@ -122,6 +131,3 @@ def send_notification(
     
     background_tasks.add_task(_broadcast_push_worker, message)
     return {"message": f"Sent to {subs_count} subscribers"}
-
-
-

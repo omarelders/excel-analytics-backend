@@ -420,6 +420,7 @@ def test_global_exception_handler():
     def crash_endpoint():
         raise RuntimeError("SecretDatabaseInternalConnectionError at 192.168.1.1:5432")
 
+    routes_before = list(app.routes)
     app.include_router(test_router)
     client = TestClient(app, raise_server_exceptions=False)
 
@@ -427,7 +428,14 @@ def test_global_exception_handler():
     assert response.status_code == 500
     data = response.json()
     assert data == {"detail": "Internal server error"}
-    assert "SecretDatabaseInternalConnectionError" not in str(data)
+    try:
+        response = client.get("/api/test-crash")
+        assert response.status_code == 500
+        data = response.json()
+        assert data == {"detail": "Internal server error"}
+        assert "SecretDatabaseInternalConnectionError" not in str(data)
+    finally:
+        app.routes[:] = routes_before
 
 
 def test_auth_session_hashing_and_cookie_security(monkeypatch):

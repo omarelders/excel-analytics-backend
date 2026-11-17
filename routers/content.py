@@ -3,7 +3,7 @@ Content Calendar Router - Content calendar endpoints
 """
 import json
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from dependencies import get_current_user
 
@@ -11,7 +11,7 @@ router = APIRouter(prefix="/api/content", tags=["content"], dependencies=[Depend
 
 
 class ContentItemCreate(BaseModel):
-    date: str = Field(..., max_length=50)  # YYYY-MM-DD format
+    date: str = Field(..., max_length=50, pattern=r"^\d{4}-\d{2}-\d{2}$")  # YYYY-MM-DD format
     title: str = Field(..., min_length=1, max_length=255)
     type: str = Field("video", max_length=50)  # 'video' or 'photo'
     platforms: List[str] = Field(default_factory=list)  # List of platform names
@@ -20,7 +20,7 @@ class ContentItemCreate(BaseModel):
 
 
 class ContentItemUpdate(BaseModel):
-    date: Optional[str] = Field(None, max_length=50)
+    date: Optional[str] = Field(None, max_length=50, pattern=r"^\d{4}-\d{2}-\d{2}$")
     title: Optional[str] = Field(None, min_length=1, max_length=255)
     type: Optional[str] = Field(None, max_length=50)
     platforms: Optional[List[str]] = None
@@ -196,7 +196,7 @@ def delete_content_item(item_id: int):
 
 
 @router.patch("/{item_id}/move")
-def move_content_item(item_id: int, new_date: str):
+def move_content_item(item_id: int, new_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$")):
     """Move a content item to a new date (for drag & drop)"""
     from database import SessionLocal, ContentItem
     from datetime import datetime

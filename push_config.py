@@ -1,11 +1,47 @@
 import os
 import json
+import base64
 from pywebpush import webpush, WebPushException
 from dotenv import load_dotenv
 
 load_dotenv()
 
 VAPID_FILE = "vapid_keys.json"
+
+
+def get_vapid_public_key_base64url(public_key_str: str) -> str:
+    """
+    Convert a PEM PUBLIC KEY or base64/base64url public key string into the
+    65-byte uncompressed P-256 point (0x04 || X || Y) encoded as URL-safe
+    Base64 without padding, as required by PushManager.subscribe().
+    """
+    from cryptography.hazmat.primitives import serialization
+
+    raw = (public_key_str or "").strip()
+    if not raw:
+        raise ValueError("Empty VAPID public key")
+
+    if "-----BEGIN" in raw:
+        pub = serialization.load_pem_public_key(raw.encode("utf-8"))
+        uncompressed = pub.public_bytes(
+            serialization.Encoding.X962,
+            serialization.PublicFormat.UncompressedPoint,
+        )
+        return base64.urlsafe_b64encode(uncompressed).decode("ascii").rstrip("=")
+
+    cleaned = "".join(raw.split()).replace("+", "-").replace("/", "_")
+    padded = cleaned + "=" * (-len(cleaned) % 4)
+    decoded = base64.urlsafe_b64decode(padded)
+    if len(decoded) == 65 and decoded[0] == 0x04:
+        return base64.urlsafe_b64encode(decoded).decode("ascii").rstrip("=")
+
+    pub = serialization.load_der_public_key(decoded)
+    uncompressed = pub.public_bytes(
+        serialization.Encoding.X962,
+        serialization.PublicFormat.UncompressedPoint,
+    )
+    return base64.urlsafe_b64encode(uncompressed).decode("ascii").rstrip("=")
+
 
 def get_vapid_keys():
     """
@@ -29,15 +65,6 @@ def get_vapid_keys():
     # Generate new keys
     print("Generating new VAPID keys...")
     try:
-        # Using pywebpush to generate isn't directly exposed as clean API in all versions
-        # defaulting to using cryptography if available, or os.popen for CLI
-        # But simpler: Instruct user or use a simple hack if pywebpush allows
-        # Actually, let's look at how to generate.
-        # For now, we will fail if not present to prompt user, OR we implement generation.
-        # To be safe and robust, I'll use a widely compatible method if possible, 
-        # but importing cryptography just for this might be overkill if not installed.
-        # pywebpush installs cryptography.
-        
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.primitives.asymmetric import ec
         
@@ -50,15 +77,6 @@ def get_vapid_keys():
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption()
         )
-        # We need the raw numbers or base64url encoded for VAPID? 
-        # pywebpush takes PEM path or string.
-        # However, for the frontend we need the Public Key in Base64URL format (or raw bytes).
-        
-        # Actually pywebpush handles PEM. But frontend needs public key.
-        # Converting PEM to the required format for frontend is tricky without libs.
-        # Let's try to stick to what py web push expects.
-        
-        # Better approach: Just save the keys and let the router serve the public one.
         
         keys = {
             "privateKey": private_pem.decode('utf-8'),

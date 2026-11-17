@@ -159,6 +159,8 @@ def get_current_user(request: Request):
 
         # Return the user object (already loaded)
         user = session.user
+        if not user:
+            raise HTTPException(status_code=401, detail="Not authenticated")
         role = getattr(user, "role", "user") or "user"
         is_admin = bool(getattr(user, "is_admin", False) or role == "admin")
         return {

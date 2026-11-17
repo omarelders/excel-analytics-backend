@@ -1,6 +1,7 @@
 """
 Shipments Router - All shipment-related endpoints
 """
+import math
 import os
 import uuid
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query, Request
@@ -363,6 +364,7 @@ def autocomplete_shipments(query: str, limit: int = Query(10, ge=1, le=100)):
     db = SessionLocal()
     try:
         search_pattern = f"%{query}%"
+        per_cat = max(1, min(limit, 25))
         
         suggestions = []
         categories = {}
@@ -373,7 +375,7 @@ def autocomplete_shipments(query: str, limit: int = Query(10, ge=1, le=100)):
                 .filter(Shipment.is_deleted == False)\
                 .filter(getattr(Shipment, field).ilike(search_pattern))\
                 .distinct()\
-                .limit(5)\
+                .limit(per_cat)\
                 .all()
             
             count = 0
@@ -406,7 +408,7 @@ def autocomplete_shipments(query: str, limit: int = Query(10, ge=1, le=100)):
         
         return {
             "query": query,
-            "suggestions": suggestions,
+            "suggestions": suggestions[:limit],
             "categories": categories
         }
     except Exception as e:
@@ -426,7 +428,7 @@ def get_analytics():
     - Summary stats
     """
     from database import SessionLocal, Shipment
-    from sqlalchemy import func, desc
+    from sqlalchemy import func, desc, or_
     
     db = SessionLocal()
     try:
@@ -435,7 +437,7 @@ def get_analytics():
         
         # Total Value (sum of amount) - excluding returned orders (مرتجع and ارتجاع للراسل) and deleted
         total_value = db.query(func.sum(Shipment.amount)).filter(
-            Shipment.status.notin_(['مرتجع', 'ارتجاع للراسل']),
+            or_(Shipment.status.is_(None), Shipment.status.notin_(['مرتجع', 'ارتجاع للراسل'])),
             Shipment.is_deleted == False
         ).scalar() or 0
         
@@ -529,19 +531,14 @@ def get_analytics():
         }
     except Exception as e:
         print(f"Analytics Error: {e}")
-        return {
-            "summary": {},
-            "status_distribution": [],
-            "top_cities": [],
-            "daily_trends": []
-        }
+        raise HTTPException(status_code=500, detail="Failed to fetch analytics")
     finally:
         db.close()
 
 
 @router.patch("/shipments/{shipment_code}/status")
 def update_shipment_status(shipment_code: str, new_status: str):
-    """Update the status of a shipment. Only allows specific status transitions."""
+    """Update the status of a shipment. Only allows specific target statuses."""
     from database import SessionLocal, Shipment
     
     # Use centralized constants
@@ -561,13 +558,6 @@ def update_shipment_status(shipment_code: str, new_status: str):
         
         if not shipment:
             raise HTTPException(status_code=404, detail="Shipment not found")
-        
-        # Check if current status allows update
-        if shipment.status not in CHANGEABLE_STATUSES:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Cannot change status from '{shipment.status}'. Only orders with status '{', '.join(CHANGEABLE_STATUSES)}' can be updated."
-            )
         
         # Update the status
         old_status = shipment.status
@@ -601,6 +591,10 @@ def update_shipment(shipment_code: str, amount: float = None, description: str =
             status_code=400, 
             detail="At least one field (amount or description) must be provided"
         )
+    if amount is not None and (not math.isfinite(amount) or amount < 0):
+        raise HTTPException(status_code=400, detail="Invalid amount")
+    if description is not None and len(description) > 2000:
+        raise HTTPException(status_code=400, detail="Description too long")
     
     db = SessionLocal()
     try:
@@ -699,6 +693,8 @@ async def upload_file(request: Request, file: UploadFile = File(...)):
             try:
                 # B) Save to DB
                 result = crud.save_upload(db, filename, parsed_data)
+                if result.get("status") == "error":
+                    raise HTTPException(status_code=400, detail=result.get("message", "No valid shipments to upload"))
                 return {
                     "file_id": result["file_id"],
                     "filename": filename,
@@ -709,10 +705,11 @@ async def upload_file(request: Request, file: UploadFile = File(...)):
                 }
             finally:
                 db.close()
-
+        except HTTPException:
+            raise
         except Exception as e:
             print(f"Error processing file: {e}")
-            return {"filename": filename, "status": "error", "message": "Failed to parse or process Excel file"}
+            raise HTTPException(status_code=400, detail="Failed to parse or process Excel file")
     finally:
         # Prevent disk exhaustion: delete temporary upload file after processing
         if os.path.exists(file_path):
@@ -733,15 +730,20 @@ def get_uploaded_files():
     db = SessionLocal()
     try:
         files = db.query(UploadedFile).order_by(UploadedFile.upload_date.desc()).all()
+        counts = dict(
+            db.query(Shipment.file_id, func.count(Shipment.id))
+            .filter(Shipment.is_deleted == False)
+            .group_by(Shipment.file_id)
+            .all()
+        )
         
         result = []
         for f in files:
-            count = db.query(func.count(Shipment.id)).filter(Shipment.file_id == f.id).scalar()
             result.append({
                 "id": f.id,
                 "filename": f.filename,
                 "upload_date": str(f.upload_date) if f.upload_date else None,
-                "record_count": count or 0
+                "record_count": counts.get(f.id, 0)
             })
             
         return {"files": result}

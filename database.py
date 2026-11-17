@@ -22,7 +22,7 @@ if not DATABASE_URL:
     )
 
 # Create the engine and session
-# engine = create_engine(DATABASE_URL)
+# engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 # # Test the connection immediately
 # try:
 #     with engine.connect() as conn:
@@ -31,7 +31,7 @@ if not DATABASE_URL:
 # except Exception as e:
 #     raise RuntimeError(f"❌ Failed to connect to database: {str(e)}")
 
-engine = create_engine(DATABASE_URL)
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 

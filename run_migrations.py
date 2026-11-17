@@ -85,4 +85,5 @@ if __name__ == "__main__":
         else:
             print("Usage: python run_migrations.py [stamp|current]")
     else:
-        run_migrations()
+        if not run_migrations():
+            sys.exit(1)

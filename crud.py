@@ -1,4 +1,5 @@
 from datetime import datetime
+import math
 
 import pandas as pd
 from sqlalchemy.orm import Session
@@ -102,7 +103,8 @@ def save_upload(db: Session, filename: str, data: list, file_path: str = None):
         for i in range(0, len(codes_list), BATCH_SIZE):
             batch = codes_list[i : i + BATCH_SIZE]
             rows = db.query(Shipment.shipment_code).filter(
-                Shipment.shipment_code.in_(batch)
+                Shipment.shipment_code.in_(batch),
+                Shipment.is_deleted == False,
             ).all()
             for r in rows:
                 if r[0]:
@@ -111,7 +113,7 @@ def save_upload(db: Session, filename: str, data: list, file_path: str = None):
     for row in data:
         row_lookup = _build_row_lookup(row)
 
-        row_status = _row_get(row_lookup, keys["status"])
+        row_status = clean_str(_row_get(row_lookup, keys["status"]))
 
         shipment_code = clean_str(_row_get(row_lookup, keys["code"]))
         shipment_code = shipment_code.strip() if shipment_code else None
@@ -127,26 +129,26 @@ def save_upload(db: Session, filename: str, data: list, file_path: str = None):
             file_id=db_file.id,
             shipment_code=shipment_code,
             date=parse_date(_row_get(row_lookup, keys["date"])),
-            client_name=_row_get(row_lookup, keys["client_name"]),
-            branch_name=_row_get(row_lookup, keys["branch_name"]),
+            client_name=clean_str(_row_get(row_lookup, keys["client_name"])),
+            branch_name=clean_str(_row_get(row_lookup, keys["branch_name"])),
             status=row_status,
-            sender_name=_row_get(row_lookup, keys["sender_name"]),
-            sender_city=_row_get(row_lookup, keys["sender_city"]),
-            recipient_name=_row_get(row_lookup, keys["recipient_name"]),
-            recipient_city=_row_get(row_lookup, keys["recipient_city"]),
-            recipient_area=_row_get(row_lookup, keys["recipient_area"]),
-            recipient_address=_row_get(row_lookup, keys["recipient_address"]),
+            sender_name=clean_str(_row_get(row_lookup, keys["sender_name"])),
+            sender_city=clean_str(_row_get(row_lookup, keys["sender_city"])),
+            recipient_name=clean_str(_row_get(row_lookup, keys["recipient_name"])),
+            recipient_city=clean_str(_row_get(row_lookup, keys["recipient_city"])),
+            recipient_area=clean_str(_row_get(row_lookup, keys["recipient_area"])),
+            recipient_address=clean_str(_row_get(row_lookup, keys["recipient_address"])),
             recipient_phone=clean_str(_row_get(row_lookup, keys["recipient_phone"])),
             recipient_mobile=clean_str(_row_get(row_lookup, keys["recipient_mobile"])),
             amount=clean_float(_row_get(row_lookup, keys["amount"])),
             shipping_fee=clean_float(_row_get(row_lookup, keys["shipping_fee"])),
             net_price=clean_float(_row_get(row_lookup, keys["net_price"])),
             total_value=clean_float(_row_get(row_lookup, keys["total_value"])),
-            price_type=_row_get(row_lookup, keys["price_type"]),
+            price_type=clean_str(_row_get(row_lookup, keys["price_type"])),
             weight=clean_float(_row_get(row_lookup, keys["weight"])),
             pieces_count=clean_int(_row_get(row_lookup, keys["pieces_count"])),
-            description=_row_get(row_lookup, keys["description"]),
-            notes=_row_get(row_lookup, keys["notes"]),
+            description=clean_str(_row_get(row_lookup, keys["description"])),
+            notes=clean_str(_row_get(row_lookup, keys["notes"])),
         )
         shipments_to_insert.append(shipment)
 
@@ -177,23 +179,27 @@ def parse_date(date_val):
     Robustly parse date from various formats.
     Handles pandas Timestamp, datetime, excel serial dates, and string dates.
     """
-    if date_val is None:
+    if date_val is None or pd.isna(date_val):
         return None
-
-    if isinstance(date_val, datetime):
-        return date_val
 
     if isinstance(date_val, pd.Timestamp):
         return date_val.to_pydatetime()
 
+    if isinstance(date_val, datetime):
+        return date_val
+
     if isinstance(date_val, (int, float)):
         # Excel serial date fallback
         try:
-            return pd.to_datetime(date_val, unit="D", origin="1899-12-30").to_pydatetime()
+            parsed = pd.to_datetime(date_val, unit="D", origin="1899-12-30")
+            return None if pd.isna(parsed) else parsed.to_pydatetime()
         except Exception:
             return None
 
     if isinstance(date_val, str):
+        date_val = date_val.strip()
+        if not date_val:
+            return None
         date_formats = [
             "%Y-%m-%d %H:%M:%S",
             "%Y-%m-%d",
@@ -207,24 +213,31 @@ def parse_date(date_val):
                 return datetime.strptime(date_val, fmt)
             except ValueError:
                 continue
+        try:
+            parsed = pd.to_datetime(date_val)
+            if not pd.isna(parsed):
+                return parsed.to_pydatetime()
+        except Exception:
+            pass
         return None
 
     return None
 
 
 def clean_float(val):
-    if val is None:
+    if val is None or pd.isna(val):
         return 0.0
     try:
         if isinstance(val, str):
             val = val.replace(",", "").strip()
-        return float(val)
+        res = float(val)
+        return res if math.isfinite(res) else 0.0
     except (ValueError, TypeError):
         return 0.0
 
 
 def clean_int(val):
-    if val is None:
+    if val is None or pd.isna(val):
         return 0
     try:
         if isinstance(val, str):
@@ -235,6 +248,9 @@ def clean_int(val):
 
 
 def clean_str(val):
-    if val is None:
+    if pd.isna(val) or val is None:
         return None
-    return str(val)
+    if isinstance(val, float) and val.is_integer():
+        return str(int(val))
+    s = str(val).strip()
+    return s if s else None
